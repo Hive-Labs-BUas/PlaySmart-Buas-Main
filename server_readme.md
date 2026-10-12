@@ -6,10 +6,10 @@
 |----------|-------       |
 | OS       | Ubuntu Linux |
 | Host     | `10.4.28.2`  |
-| SSH user | `kowalski`   |
+| SSH user | `private`    |
 
 ```bash
-ssh kowalski@10.4.28.2
+ssh private@10.4.28.2
 ```
 
 ---
