@@ -100,3 +100,9 @@ exclude = [
     "src/riotAPI.ipynb",
     "server/src",
 ]
+
+[tool.ruff.lint]
+# The rule set ruff used by default before 0.16 (pycodestyle errors + Pyflakes). Ruff
+# 0.16 widened its defaults and CI installs the newest ruff, so without this line the
+# Lint job fails on 140+ findings in iteration-4 code that nobody is rewriting.
+select = ["E4", "E7", "E9", "F"]
