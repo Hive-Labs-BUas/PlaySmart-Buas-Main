@@ -150,6 +150,39 @@ were already recorded.
 |--|--|--|
 | `src/session.py` `game()`, `src/key_listener.py`, `src/pop_up_screen.py`, `src/preflight.py`, `src/liveclient_recorder.py`, `.env.example` | `PLAYSMART_GAME=league` (default) is the iteration-5 behaviour. Any other value is the manual F7/F12 bracket: no wait for League's API, no game-state stream, F12 ends the session cleanly (not an abort), pre-flight skips the League check, `sessions.csv` and the manifest carry the game name. | The org's other rigs capture Valorant from `Dev`. Without this switch a merge would have made them wait forever for a League API that never appears. They still gain the graceful stop (their 44-byte WAVs), session ids, the OBS anchor, pre-flight and the upload modes. Untested on a Valorant PC - T1 + one F7/F12 game there before relying on it. |
 
+### After the first full merge of the 28 Sep sessions (14 Oct 2026)
+
+Three customs, five rigs, every stream merged in the analysis toolkit; the capture
+audit is in the team repo (`first-merge-2026-09-28-sessions`). What it found on the
+rig side, and the change for each:
+
+- `src/eye_tracking_script.py` — **gaze validity was never recorded.** The Tobii marks
+  an untracked eye with NaN coordinates, the `None in (...)` check let them through,
+  `int(nan * width)` raised inside the SDK callback and the sample vanished: 2-15 % of
+  samples missing, every written row "valid". Validity now comes from the tracker's
+  flags, NaN is treated as missing, invalid samples are written with empty
+  coordinates and `gaze_valid=False`, one tracked eye is used when the other is lost.
+  Also an on-screen **head-distance warning** (50-75 cm; one player sat at 79 cm) and
+  `samples_per_s` / `head_distance_warnings` in `<sid>_gaze.json`.
+- `src/liveclient_recorder.py` — `wait_for_game` accepts only a live game (champion
+  present, clock advancing or on the loading screen): the post-game screen produced
+  a 58-row session with an empty champion. `late_start_s` in the meta with a loud
+  console warning. `minimap_rect_px` read from `<data>/json/` (it was read from the
+  working directory, so a measured rectangle never reached the meta) and otherwise
+  **estimated from the client's MinimapScale**, fitted on five measured rigs (within a
+  pixel or two). The game is declared over 5 s after the API stops answering, not after
+  ten timed-out polls (audio and video ran 25 s past the end).
+- `src/key_listener.py` — **auto re-arm** after every game (`PLAYSMART_REARM=0` to
+  disable); one rig was armed late for game 2 and not at all for game 3. End-of-session
+  report prints late start, rectangle source and the game id to download.
+- `src/preflight.py` — new checks: PC clock vs time server (rigs were 2-5 s apart),
+  League minimap scale against the rig standard (0.3-1.5 across rigs), minimap
+  rectangle measured, OBS 1920x1080 at 60 fps (one rig recorded 1280x720 at 30), and a
+  line naming the streams this rig will not record (no emotion on 28 Sep).
+- `src/apply_rig_settings.py` — new: writes the rig standard (MinimapScale 1.0) into
+  `game.cfg` with a backup, client closed.
+- `tests/test_liveclient_guards.py`, `tests/test_rig_settings.py` — new.
+
 ### Not changed, on purpose
 
 - `auto_merge.py` / the server pipeline (separate repository): `AUTO_ALIGN_EMOTION` should

@@ -13,6 +13,12 @@ Exit code 1 if anything the capture cannot run without is missing; 0 otherwise.
 `warn` lines are things worth knowing that do not block a capture.
 
 Added 2026-09 (iteration 5).
+
+Modified 2026-10-14, after the 28 Sep sessions: checks the PC clock against a time
+server (rigs were up to 5 s apart), the League client's minimap scale against the rig
+standard (it ranged 0.3-1.5 across rigs, so the same look landed on minimaps of very
+different sizes), whether a minimap rectangle has been measured, the OBS frame rate
+and output size, and prints which streams this rig will actually record.
 """
 
 from __future__ import annotations
@@ -36,6 +42,14 @@ import session  # noqa: E402  (loads .env)
 
 OK, WARN, FAIL = " ok  ", "warn ", "FAIL "
 _failures = 0
+
+# The rig standard. Every capture PC uses these so that a player's numbers can be
+# compared with another player's: the same minimap size on screen, the same video.
+STANDARD_MINIMAP_SCALE = 1.0
+STANDARD_HUD_SCALE = None            # not enforced yet; reported
+STANDARD_OBS_FPS = 60
+CLOCK_MAX_OFFSET_S = 0.5             # between this PC and the time server
+NTP_SERVER = os.environ.get("PLAYSMART_NTP_SERVER", "time.windows.com")
 
 
 def report(flag: str, name: str, detail: str = "") -> None:
@@ -194,8 +208,8 @@ def check_display() -> None:
         return
     primary = monitors[0]
     detail = f"{primary.width}x{primary.height}" + (f", {len(monitors)} monitors" if len(monitors) > 1 else "")
-    flag = OK if (primary.width, primary.height) == (1920, 1080) else WARN
-    report(flag, "display", detail + ("" if flag is OK else "  (rig and OBS are set up for 1920x1080)"))
+    flag = OK if (primary.width, primary.height) in ((1920, 1080), (2560, 1440)) else WARN
+    report(flag, "display", detail + ("" if flag is OK else "  (rigs are 1920x1080 or 2560x1440; OBS output must be 1920x1080)"))
     if platform.system() == "Windows":
         try:
             import ctypes
@@ -335,9 +349,17 @@ def check_obs() -> None:
         if c.get_record_status().output_active:
             report(WARN, "obs recording", "already recording - obs_recorder will stop and restart it")
         vs = c.get_video_settings()
-        res = f"{vs.base_width}x{vs.base_height} -> {vs.output_width}x{vs.output_height} @ {vs.fps_numerator / max(vs.fps_denominator, 1):.0f} fps"
-        flag = OK if (vs.base_width, vs.base_height, vs.output_width, vs.output_height) == (1920, 1080, 1920, 1080) else WARN
-        report(flag, "obs video", res + ("" if flag is OK else "  (set base and output to 1920x1080)"))
+        fps = vs.fps_numerator / max(vs.fps_denominator, 1)
+        res = f"{vs.base_width}x{vs.base_height} -> {vs.output_width}x{vs.output_height} @ {fps:.0f} fps"
+        problems = []
+        if (vs.output_width, vs.output_height) != (1920, 1080):
+            problems.append("output 1920x1080")
+        if (vs.base_width, vs.base_height) != (vs.output_width, vs.output_height) and vs.output_width < 1920:
+            problems.append("output smaller than the canvas")
+        if abs(fps - STANDARD_OBS_FPS) > 0.5:
+            problems.append(f"{STANDARD_OBS_FPS} fps")
+        flag = OK if not problems else WARN
+        report(flag, "obs video", res + ("" if flag is OK else "  (rig standard: " + ", ".join(problems) + "; load obs settings/PlaySmart_League.json)"))
         try:
             scene = c.get_current_program_scene().current_program_scene_name
             items = c.get_scene_item_list(scene).scene_items
@@ -358,6 +380,107 @@ def check_obs() -> None:
             pass
     except Exception as exc:  # noqa: BLE001
         report(WARN, "obs", f"connected but query failed ({exc})")
+
+
+def check_clock() -> None:
+    """The PC clock against a time server.
+
+    Every stream is stamped with this clock. The merge joins players through the
+    game clock, so a few seconds of offset do not break it, but anything that joins
+    on wall time across PCs does break, and a mid-game time sync (Pc_4, 28 Sep 2026)
+    steps the clock under a running recording. Sync *before* the session.
+    """
+    if platform.system() != "Windows":
+        report(WARN, "clock", "offset check only implemented on Windows (w32tm)")
+        return
+    import subprocess
+    try:
+        out = subprocess.run(["w32tm", "/stripchart", f"/computer:{NTP_SERVER}", "/samples:1",
+                              "/dataonly"], capture_output=True, text=True, timeout=15).stdout
+    except Exception as exc:  # noqa: BLE001
+        report(WARN, "clock", f"could not run w32tm ({exc})")
+        return
+    m = re.search(r",\s*([+-]?\d+(?:\.\d+)?)s", out)
+    if not m:
+        report(WARN, "clock", f"no answer from {NTP_SERVER} (offline?) - run `w32tm /resync` on the BUas network")
+        return
+    offset = float(m.group(1))
+    flag = OK if abs(offset) <= CLOCK_MAX_OFFSET_S else FAIL
+    report(flag, "clock", f"{offset:+.2f} s vs {NTP_SERVER}"
+           + ("" if flag is OK else "  -> run `w32tm /resync` (as admin) now, not during the game"))
+
+
+def check_league_settings() -> None:
+    """The League client's game.cfg: minimap scale, HUD scale, resolution.
+
+    The gaze-on-minimap numbers are only comparable between players if the minimap
+    is the same size on every rig. Needs the client open (not a game).
+    """
+    if session.game() != "league":
+        return
+    try:
+        import lcu
+        client = lcu.Client.connect(timeout=2.0)
+    except Exception as exc:  # noqa: BLE001
+        report(WARN, "league client", f"lcu unavailable ({exc})")
+        return
+    if client is None:
+        report(WARN, "league client", "not running - open the client so its settings can be checked")
+        return
+    try:
+        gs = client.game_settings() or {}
+    except Exception as exc:  # noqa: BLE001
+        report(WARN, "league settings", f"could not read game settings ({exc})")
+        return
+    hud = gs.get("HUD") or {}
+    gen = gs.get("General") or {}
+    scale = hud.get("MinimapScale")
+    try:
+        flag = OK if abs(float(scale) - STANDARD_MINIMAP_SCALE) < 0.01 else FAIL
+    except (TypeError, ValueError):
+        flag = WARN
+    report(flag, "minimap scale", f"MinimapScale {scale}"
+           + ("" if flag is OK else f"  -> set {STANDARD_MINIMAP_SCALE:.1f} in Settings > Interface (rig standard)"))
+    extras = {k: hud.get(k) for k in ("GlobalScale", "ChatScale") if k in hud}
+    extras.update({k: gen.get(k) for k in ("Width", "Height", "WindowMode") if k in gen})
+    if extras:
+        report(OK, "league hud", ", ".join(f"{k} {v}" for k, v in extras.items()))
+
+
+def check_minimap_rect() -> None:
+    """Has the minimap rectangle been measured on this rig?"""
+    if session.game() != "league" or skipped("gaze"):
+        return
+    rect = session.data_dir() / "json" / "minimap_rect.json"
+    if rect.is_file():
+        try:
+            import json
+            r = json.loads(rect.read_text(encoding="utf-8"))
+            report(OK, "minimap rect", f"measured: {r.get('x0')},{r.get('y0')}-{r.get('x1')},{r.get('y1')} px "
+                   f"({rect.name}; re-measure after changing resolution or minimap scale)")
+        except (OSError, ValueError):
+            report(WARN, "minimap rect", f"{rect} unreadable")
+    else:
+        report(WARN, "minimap rect", "not measured - the recorder estimates it from MinimapScale; "
+               "`gaze_validation.py --rect-only` with the game open takes 20 s and is exact")
+
+
+def check_streams() -> None:
+    """One line saying which streams this rig will write - so 'no emotion' is a
+    decision made before the game, not a discovery after it."""
+    streams = ["gamestate", "gaze", "emotion", "input", "audio", "eda", "video"]
+    disabled = {
+        "gaze": skipped("gaze"),
+        "emotion": skipped("emotion") or os.environ.get("PLAYSMART_OPENFACE", "1") == "0",
+        "input": skipped("input"),
+        "audio": skipped("audio"),
+        "eda": skipped("eda"),
+        "video": os.environ.get("PLAYSMART_OBS", "1") == "0",
+    }
+    off = [s for s in streams if disabled.get(s)]
+    on = [s for s in streams if s not in off]
+    report(WARN if off else OK, "streams", "recording: " + ", ".join(on)
+           + (f"   NOT recording: {', '.join(off)}" if off else ""))
 
 
 def check_league() -> None:
@@ -409,8 +532,12 @@ def main() -> None:
     check_microphone(sample=not args.no_mic)
     check_ring(scan=not args.no_ble)
     check_obs()
+    check_clock()
+    check_league_settings()
+    check_minimap_rect()
     check_league()
     check_server()
+    check_streams()
     print()
     if _failures:
         print(f"{_failures} blocking problem(s) above. Fix them before pressing F7.")

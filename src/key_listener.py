@@ -28,6 +28,13 @@ guessing which file in each folder is newest.
 
 Keys: F7 arms, F12 aborts. Same as before.
 
+Modified 2026-10-14: **re-arms itself after every game** (``PLAYSMART_REARM=0`` to
+go back to pressing F7 each time). On 28 Sep 2026 one rig was armed late for game 2
+and never armed for game 3; with auto re-arm the next game is caught from its loading
+screen without anyone touching the keyboard. The end-of-session report now also
+prints the game-state meta's warnings (late start, no minimap rectangle) so they are
+read while the players are still in the room.
+
     python src/key_listener.py                 # normal capture
     python src/key_listener.py --dry-run       # no League, no hardware, stubs
     python src/key_listener.py --once          # one game then exit
@@ -259,6 +266,33 @@ def verify_outputs(sid: str, dry_run: bool = False, video: bool = False) -> bool
     return ok
 
 
+def report_meta(sid: str) -> None:
+    """Say, at the end of the session, what the game-state meta recorded about it.
+
+    A late start or a missing minimap rectangle is only worth knowing while the
+    players are still in the room; it was invisible in the console scroll before.
+    """
+    import json
+    meta_file = session.stream_dir("gamestate") / f"{sid}_meta.json"
+    try:
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    late = meta.get("late_start_s")
+    if late is not None and late > 0.5:
+        print(f"  !! armed {late:.1f} s into the game - that much of every stream is missing")
+    rect = meta.get("minimap_rect_px") or {}
+    if not rect.get("x1"):
+        print("  !! no minimap rectangle in the meta - run gaze_validation.py --rect-only")
+    elif "estimated" in str(rect.get("source", "")):
+        print("  minimap rectangle estimated from MinimapScale (measure it once for a better one)")
+    if meta.get("game_id"):
+        print(f"  game {meta.get('platform_id') or '?'}_{meta['game_id']} - download THIS replay "
+              "from the client tonight; it only plays on this patch")
+    else:
+        print("  !! no game id in the meta - the replay must be matched by roster")
+
+
 def wait_for_abort(abort: threading.Event, stop_flag: threading.Event) -> None:
     """Set `abort` if F12 is pressed while a capture is running."""
     try:
@@ -352,6 +386,8 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
     obs_recorder.stop(sid, obs_handle)
     stop_recorders(procs, sid, dry_run)
     verify_outputs(sid, dry_run, video=obs_handle is not None)
+    if not dry_run and not manual:
+        report_meta(sid)
 
     if not dry_run:
         print("Labelling and uploading…")
@@ -378,8 +414,10 @@ def main() -> None:
     if args.dry_run:
         args.no_arm = True
 
+    rearm = os.environ.get("PLAYSMART_REARM", "1") != "0"
+    first = True
     while True:
-        if not args.no_arm:
+        if not args.no_arm and (first or not rearm):
             print("Press F7 to arm (F12 aborts once a capture is running)…")
             try:
                 import keyboard
@@ -389,9 +427,13 @@ def main() -> None:
                 args.no_arm = True
 
         run_capture(args.dry_run, args.dry_seconds)
+        first = False
 
         if args.once:
             return
+        if rearm and not args.no_arm:
+            print("Re-armed automatically - the next game is recorded from its loading screen. "
+                  "Ctrl+C to stop; PLAYSMART_REARM=0 brings back F7 per game.")
 
 
 if __name__ == "__main__":

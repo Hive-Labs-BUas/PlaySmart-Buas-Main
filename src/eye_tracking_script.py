@@ -8,6 +8,15 @@ Modified 2026-09 (iteration 5, League of Legends port):
   gaze_valid=False for plumbing tests only;
 * two commented-out legacy copies of this script removed (they are in git history).
 
+Modified 2026-10-14: validity is taken from the Tobii's own flags, and a sample the
+tracker could not place (a blink, a look away) is written as a row with empty
+coordinates and gaze_valid=False instead of being dropped. The Tobii reports an
+untracked eye as NaN, not None; the old `None in (...)` test let those through,
+`int(nan * width)` then raised inside the callback and the SDK swallowed the error,
+so every invalid sample silently vanished and every written row said valid. The
+28 Sep 2026 sessions are 100 % "valid" with 2-15 % of samples missing for that reason.
+Also warns on-screen when the player sits outside 50-75 cm from the tracker.
+
 Modified 2026-09-25: keeps more of what the Tobii already sends - per-eye validity,
 the gaze origin in user coordinates (head position and distance to the screen), the
 tracker's own timestamps, and eye openness when the SDK/device provide it (blink
@@ -15,6 +24,7 @@ rate). Writes `<sid>_gaze.json` with the tracker, its frequency and the display
 geometry, so gaze accuracy can be stated in degrees, not just pixels.
 """
 
+import math
 import time
 import os
 import sys
@@ -86,6 +96,45 @@ baseline_pupil = None
 previous_avg_pupil = None
 
 # ---------------------------
+# HEAD DISTANCE WARNING
+# ---------------------------
+# The Tobii Pro Spark tracks from about 45 to 85 cm; accuracy is best in the
+# middle. Pc_3's player on 28 Sep 2026 sat at ~79 cm. Warn (on this console and in
+# the session json) when the rolling median leaves the comfortable band.
+HEAD_MIN_MM, HEAD_MAX_MM = 500.0, 750.0
+HEAD_WARN_EVERY_S = 15.0
+_head_window = []
+_head_last_warn = 0.0
+_head_warnings = 0
+
+
+def _finite(v):
+    """True for a real number the tracker actually measured (not None, not NaN)."""
+    try:
+        return v is not None and math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _head_check(head_dist, unix_time):
+    global _head_last_warn, _head_warnings
+    if not _finite(head_dist):
+        return
+    _head_window.append(float(head_dist))
+    if len(_head_window) > 600:          # ~10 s at 60 Hz
+        del _head_window[:-600]
+    if unix_time / 1000 - _head_last_warn < HEAD_WARN_EVERY_S or len(_head_window) < 300:
+        return
+    med = sorted(_head_window)[len(_head_window) // 2]
+    if med < HEAD_MIN_MM or med > HEAD_MAX_MM:
+        _head_last_warn = unix_time / 1000
+        _head_warnings += 1
+        where = "too close" if med < HEAD_MIN_MM else "too far"
+        print(f"!! head distance {med / 10:.0f} cm - {where} (keep 50-75 cm from the screen)",
+              flush=True)
+
+
+# ---------------------------
 # EYE OPENNESS (optional stream, newer SDKs / devices only)
 # ---------------------------
 latest_openness = {"left": None, "right": None, "left_valid": None, "right_valid": None}
@@ -103,9 +152,9 @@ def _origin(gaze_data, side):
     """(x, y, z) of an eye in the user coordinate system, mm; None when not tracked."""
     o = gaze_data.get(f"{side}_gaze_origin_in_user_coordinate_system")
     ok = gaze_data.get(f"{side}_gaze_origin_validity")
-    if not o or (ok is not None and not ok):
+    if not o or (ok is not None and not ok) or not all(_finite(v) for v in o):
         return (None, None, None)
-    return tuple(o)
+    return tuple(float(v) for v in o)
 
 
 # ---------------------------
@@ -170,22 +219,45 @@ def gaze_data_callback(gaze_data):
     # Now a dropout is recorded as a dropout: coordinates are None and
     # gaze_valid is False, so analysis can exclude those samples instead of
     # silently averaging noise into the result.
-    gaze_valid = (not use_mock_data
-                  and None not in (left_gaze_x, left_gaze_y, right_gaze_x, right_gaze_y))
+    #
+    # 14 Oct 2026: the Tobii marks an untracked eye with validity False and NaN
+    # coordinates, never None. Use its flags, and treat NaN as missing, so an
+    # invalid sample is written as such instead of raising inside this callback
+    # (the SDK swallows the exception and the sample is lost without a trace).
+    left_ok = bool(left_valid) if left_valid is not None else _finite(left_gaze_x)
+    right_ok = bool(right_valid) if right_valid is not None else _finite(right_gaze_x)
+    left_ok = left_ok and _finite(left_gaze_x) and _finite(left_gaze_y)
+    right_ok = right_ok and _finite(right_gaze_x) and _finite(right_gaze_y)
+    if not left_ok:
+        left_gaze_x = left_gaze_y = None
+    if not right_ok:
+        right_gaze_x = right_gaze_y = None
+    gaze_valid = (not use_mock_data) and (left_ok or right_ok)
 
-    if None not in (left_gaze_x, left_gaze_y, right_gaze_x, right_gaze_y):
+    if left_ok and right_ok:
         avg_x = (left_gaze_x + right_gaze_x) / 2
         avg_y = (left_gaze_y + right_gaze_y) / 2
+    elif left_ok:
+        avg_x, avg_y = left_gaze_x, left_gaze_y   # one eye is better than a gap
+    elif right_ok:
+        avg_x, avg_y = right_gaze_x, right_gaze_y
+    else:
+        avg_x = avg_y = None
+    if avg_x is not None:
         smoothed_x = int(avg_x * screen_width)
         smoothed_y = int(avg_y * screen_height)
     else:
         smoothed_x = smoothed_y = None
 
-    # Average pupil
+    # Average pupil (NaN when the eye is not tracked)
+    left_pupil = float(left_pupil) if _finite(left_pupil) else None
+    right_pupil = float(right_pupil) if _finite(right_pupil) else None
     if left_pupil is not None and right_pupil is not None:
         avg_pupil = (left_pupil + right_pupil) / 2
     else:
-        avg_pupil = left_pupil or right_pupil
+        avg_pupil = left_pupil if left_pupil is not None else right_pupil
+
+    _head_check(head_dist, unix_time)
 
     pupil_dilation = None
     pupil_delta_change = None
@@ -235,8 +307,8 @@ def gaze_data_callback(gaze_data):
         "pupil_delta_change": pupil_delta_change,  # NEW
         "screen_resolution": screen_resolution,
         # 25 Sep 2026: kept from the same sample
-        "left_valid": left_valid,
-        "right_valid": right_valid,
+        "left_valid": left_ok,
+        "right_valid": right_ok,
         "head_x_mm": head_x,
         "head_y_mm": head_y,
         "head_dist_mm": head_dist,
@@ -335,6 +407,12 @@ finally:
                 "valid_share": round(float(valid), 4) if valid == valid else None,
                 "head_dist_mm_median": (round(float(df["head_dist_mm"].dropna().median()), 1)
                                         if df["head_dist_mm"].notna().any() else None),
+                "head_distance_warnings": _head_warnings,
+                "head_distance_band_mm": [HEAD_MIN_MM, HEAD_MAX_MM],
+                # samples per second actually written, against the tracker's rate:
+                # with invalid rows kept this should match frequency_hz
+                "samples_per_s": (round(len(df) * 1000 / max(1, int(df["unix_time"].iloc[-1] - df["unix_time"].iloc[0])), 1)
+                                  if len(df) > 1 else None),
             })
             json_path = session.stream_path("gaze", ext="json")
             json_path.write_text(json.dumps(info, indent=2), encoding="utf-8")

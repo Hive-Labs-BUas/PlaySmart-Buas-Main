@@ -1,5 +1,22 @@
 """Record League game state next to the other capture streams.
 
+Modified 2026-10-14, after the first full merge of the 28 Sep sessions:
+* ``wait_for_game`` only accepts a payload that is a live game: the active player has a
+  champion and the game clock advances between two polls. The API keeps answering on
+  the post-game screen; a session armed there (Pc_5, 20:26 on 28 Sep) recorded 58 rows
+  of an empty champion with the clock jumping about.
+* a game is declared over after 5 s without an answer, not after ten timed-out polls
+  (up to 25 s), so audio and video stop with the game instead of running on.
+* the meta records ``late_start_s`` (the game time of the first row) and the console
+  shouts when it is above half a second: the recorder was armed after the loading
+  screen and that much of the game is missing.
+* ``minimap_rect_px`` is read from ``<data>/json/minimap_rect.json`` (it looked only
+  under the working directory before, so a measured rectangle was never picked up),
+  and when nobody measured one it is **estimated from the client's MinimapScale** and
+  the screen size, marked ``"source": "estimated"``. The fit comes from five rigs
+  measured on their screen recordings (scales 0.3-1.5): side = (0.100 + 0.042 x scale)
+  x screen width, anchored 0.16 % of the width from the bottom-right corner.
+
 Modified 2026-09-25: keeps more of the payload (combat stats, ability levels, items,
 skins, spells, runes), writes ``<sid>_players.csv`` with every player's state, and
 adds the client's settings, queue and tier to the meta (``lcu.client_context``).
@@ -69,8 +86,12 @@ POLL_HZ = 2.0
 # this to that path to validate properly instead of skipping verification.
 VERIFY: "str | bool" = False
 
-# How many consecutive failed polls mean the game is over rather than hitching.
+# How many consecutive failed polls mean the game is over rather than hitching,
+# and the wall-time cap on that: a poll that times out costs 2 s, so ten of them
+# kept audio and video rolling for 25 s past the end of the game on 28 Sep 2026
+# (Pc_1, Pc_5). Whichever comes first ends the recording.
 MISS_LIMIT = 10
+MISS_SECONDS = 5.0
 
 STATE_COLUMNS = [
     "session_id", "unix_time_ms", "game_time_s",
@@ -362,19 +383,59 @@ def meta_dict(sid: str, data: dict, started_ms: int) -> dict:
     }
 
 
+# Minimap side as a fraction of screen width, per League MinimapScale. Measured on the
+# 28 Sep 2026 screen recordings of five rigs (scales 0.3, 0.9, 1.0, 1.32, 1.5 gave
+# 0.113, 0.138, 0.145, 0.156, 0.163 of the width); linear within 0.003 of each.
+MINIMAP_SIDE_A, MINIMAP_SIDE_B = 0.100, 0.042
+MINIMAP_MARGIN = 0.0016  # of screen width, between the map and the screen edge
+
+
+def estimate_minimap_rect(minimap_scale, width: int, height: int) -> "dict | None":
+    """Where the minimap sits for a MinimapScale, on a screen of this size.
+
+    Good to about ten pixels at 1440p. A measured rectangle (``gaze_validation.py
+    --rect-only``) always wins over this.
+    """
+    try:
+        scale = float(minimap_scale)
+    except (TypeError, ValueError):
+        return None
+    if not (0.1 <= scale <= 2.5) or width <= 0 or height <= 0:
+        return None
+    side = (MINIMAP_SIDE_A + MINIMAP_SIDE_B * scale) * width
+    margin = MINIMAP_MARGIN * width
+    x1, y1 = width - margin, height - margin
+    return {"x0": round(x1 - side), "y0": round(y1 - side), "x1": round(x1), "y1": round(y1),
+            "screen_px": [width, height], "minimap_scale": scale,
+            "source": "estimated from the client's MinimapScale (liveclient_recorder.estimate_minimap_rect)"}
+
+
+def _screen_px() -> "tuple[int, int] | None":
+    try:
+        import screeninfo
+        m = screeninfo.get_monitors()[0]
+        return int(m.width), int(m.height)
+    except Exception:
+        return None
+
+
 def setup_records() -> dict:
     """The per-PC measurements from ``gaze_validation.py``, for the session meta.
 
-    ``minimap_rect_px`` (data/json/minimap_rect.json) and the newest
-    ``gaze_validation`` (data/gaze/validation_*.json). Both optional.
+    ``minimap_rect_px`` (``<data>/json/minimap_rect.json``) and the newest
+    ``gaze_validation`` (``<data>/gaze/validation_*.json``). Both optional.
     """
     out = {}
-    rect = Path("data/json/minimap_rect.json")
-    try:
-        if rect.is_file():
-            out["minimap_rect_px"] = json.loads(rect.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        pass
+    candidates = [playsmart_session.data_dir() / "json" / "minimap_rect.json",
+                  Path("data/json/minimap_rect.json")]
+    for rect in candidates:
+        try:
+            if rect.is_file():
+                out["minimap_rect_px"] = json.loads(rect.read_text(encoding="utf-8"))
+                out["minimap_rect_px"].setdefault("source", f"measured ({rect})")
+                break
+        except (OSError, ValueError):
+            pass
     try:
         gaze_dir = playsmart_session.data_dir() / "gaze"
         latest = sorted(gaze_dir.glob("validation_*.json"))
@@ -408,6 +469,20 @@ def add_identity(meta: dict, meta_file: Path) -> None:
         meta.update(lcu.client_context())
     except Exception as exc:
         meta["context_source"] = f"error: {exc}"
+    # No measured minimap rectangle: estimate it from the client's settings so the
+    # merge never has to fall back to a fixed corner that is wrong on most rigs.
+    if not (meta.get("minimap_rect_px") or {}).get("x1"):
+        scale = ((meta.get("game_settings") or {}).get("HUD") or {}).get("MinimapScale")
+        screen = _screen_px()
+        est = estimate_minimap_rect(scale, *screen) if screen else None
+        if est:
+            meta["minimap_rect_px"] = est
+            print(f"[liveclient] minimap rectangle estimated from MinimapScale {float(scale):.2f}: "
+                  f"{est['x0']},{est['y0']}-{est['x1']},{est['y1']} px. Measure it once with "
+                  "`gaze_validation.py --rect-only` for a better one.", flush=True)
+        else:
+            print("[liveclient] !! no minimap rectangle: run `gaze_validation.py --rect-only` "
+                  "with the game open; gaze-on-minimap will use a default corner", flush=True)
     try:
         meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except OSError as exc:
@@ -421,14 +496,60 @@ def add_identity(meta: dict, meta_file: Path) -> None:
               "will be matched by roster afterwards", flush=True)
 
 
+def game_time_of(data: "dict | None") -> "float | None":
+    try:
+        return float(dig(data, "gameData", "gameTime", default=None))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_live(data: "dict | None", previous: "dict | None" = None) -> bool:
+    """A payload from a game that is actually being played.
+
+    The API also answers on the post-game screen and briefly on a dead client, with
+    an empty active player and a clock that does not move. Require a champion for the
+    active player, a non-empty roster, and - when a previous poll is given - a game
+    clock that moved forward since then.
+    """
+    if not data or not find_active(data).get("championName"):
+        return False
+    if not (dig(data, "allPlayers", default=[]) or []):
+        return False
+    if previous is not None:
+        t0, t1 = game_time_of(previous), game_time_of(data)
+        if t0 is None or t1 is None:
+            return False
+        # On the loading screen the clock sits at 0 with the roster already known:
+        # that is a game about to start, worth recording from its first tick.
+        if t1 <= t0 and not (t0 == 0 and t1 == 0):
+            return False
+    return True
+
+
+# Arm later than this into the game and the console says so. A session armed after
+# the loading screen is missing exactly this much of every stream.
+LATE_START_S = 0.5
+
+
 def wait_for_game(abort: "threading.Event | None" = None,
-                  poll_seconds: float = 2.0) -> "dict | None":
-    """Block until a game is running. None if `abort` is set first."""
+                  poll_seconds: float = 1.0) -> "dict | None":
+    """Block until a game is running. None if `abort` is set first.
+
+    Returns the first payload of a *live* game (see :func:`is_live`): two
+    consecutive polls with a champion and an advancing clock. Polls every second
+    (was two) so that arming during the loading screen catches game time 0.
+    """
     http = requests.Session()
+    previous = None
     while abort is None or not abort.is_set():
         data = poll(http)
-        if data is not None:
-            return data
+        if data is not None and is_live(data):
+            if previous is not None and is_live(data, previous):
+                return data
+            previous = data
+            time.sleep(0.5)
+            continue
+        previous = None
         time.sleep(poll_seconds)
     return None
 
@@ -455,6 +576,14 @@ def record_game(sid: str, out_dir: Path, first: "dict | None" = None,
 
     meta = meta_dict(sid, data, started)
     meta.update(setup_records())
+    first_t = game_time_of(data)
+    meta["late_start_s"] = round(first_t, 2) if first_t is not None else None
+    if first_t is not None and first_t > LATE_START_S:
+        print("!" * 68, flush=True)
+        print(f"!!  armed late: the game was already at {first_t:.1f} s. Every stream of this "
+              "session misses that much. Next time press F7 before the loading screen ends.",
+              flush=True)
+        print("!" * 68, flush=True)
     meta_file = out_dir / f"{sid}_meta.json"
     meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     # The game id comes from the League client, not this API; asking can take a few
@@ -466,6 +595,7 @@ def record_game(sid: str, out_dir: Path, first: "dict | None" = None,
     seen = set()
     period = 1.0 / POLL_HZ
     misses = 0
+    first_miss = None
 
     state_file = out_dir / f"{sid}_gamestate.csv"
     event_file = out_dir / f"{sid}_events.csv"
@@ -491,6 +621,7 @@ def record_game(sid: str, out_dir: Path, first: "dict | None" = None,
 
                 if data is not None:
                     misses = 0
+                    first_miss = None
                     row = state_row(sid, data)
                     sw.writerow(row)
                     pw.writerows(player_rows(sid, data, row["unix_time_ms"], row["game_time_s"]))
@@ -510,7 +641,8 @@ def record_game(sid: str, out_dir: Path, first: "dict | None" = None,
                     # hitch mid-game. Tolerate a few misses so one dropped
                     # request does not truncate a live recording.
                     misses += 1
-                    if misses >= MISS_LIMIT:
+                    first_miss = first_miss or time.time()
+                    if misses >= MISS_LIMIT or time.time() - first_miss >= MISS_SECONDS:
                         print("[liveclient] client stopped responding — game over", flush=True)
                         break
 
