@@ -17,6 +17,22 @@ so every invalid sample silently vanished and every written row said valid. The
 28 Sep 2026 sessions are 100 % "valid" with 2-15 % of samples missing for that reason.
 Also warns on-screen when the player sits outside 50-75 cm from the tracker.
 
+Modified 2026-11-02:
+* `unix_time` is now the Tobii's own `system_time_stamp` converted to wall time with a
+  clock offset measured at start (and re-measured at the end, both in the json). The
+  callback's arrival time jittered by ~25 ms SD against the tracker clock on the 26 Oct
+  session; it is kept as `callback_unix_time` for comparison.
+* Per-eye 3D gaze point and gaze origin in the user coordinate system (mm) are kept, not
+  just their average: visual angle and angular velocity (I-VT fixation filtering) need
+  them. Per-eye pupil validity is kept too.
+* Eye openness: the Pro Spark has no openness stream (Spectrum/Fusion only). The
+  subscribe call succeeds anyway, so `eye_openness: true` was written to every json while
+  the columns stayed empty. The json now says whether any openness sample *arrived*, and
+  the columns are dropped when none did.
+* Tracker notifications (connection lost/restored, calibration changed, device faults and
+  warnings, stream buffer overflow) and stream errors are logged with a timestamp into
+  the json, so a gap in the data can be explained instead of guessed at.
+
 Modified 2026-09-25: keeps more of what the Tobii already sends - per-eye validity,
 the gaze origin in user coordinates (head position and distance to the screen), the
 tracker's own timestamps, and eye openness when the SDK/device provide it (blink
@@ -135,13 +151,79 @@ def _head_check(head_dist, unix_time):
 
 
 # ---------------------------
-# EYE OPENNESS (optional stream, newer SDKs / devices only)
+# TRACKER CLOCK -> WALL CLOCK
+# ---------------------------
+# The Tobii stamps every sample with its own monotonic clock (us). One offset to the
+# PC's wall clock, measured as the median of a burst of paired readings, converts
+# it; re-measured at the end to report drift. The callback's own time.time() is
+# kept next to it (callback_unix_time) - it is what the archive used, and it is
+# the number the ~25 ms jitter was measured on.
+def measure_clock_offset_us(n: int = 25):
+    """Median of (wall clock us - tracker system clock us) over n paired readings."""
+    if use_mock_data or not hasattr(tr, "get_system_time_stamp"):
+        return None
+    pairs = []
+    for _ in range(n):
+        a = time.time()
+        ts = tr.get_system_time_stamp()
+        b = time.time()
+        pairs.append(((a + b) / 2) * 1e6 - ts)
+    pairs.sort()
+    return pairs[len(pairs) // 2]
+
+
+clock_offset_us = measure_clock_offset_us()
+if clock_offset_us is None:
+    print("Tracker clock offset: unavailable - unix_time falls back to the callback time")
+else:
+    print(f"Tracker clock offset: {clock_offset_us / 1e6:.3f} s (wall - tracker)")
+
+
+def to_unix_ms(system_ts, fallback_ms: int) -> int:
+    if clock_offset_us is None or not _finite(system_ts):
+        return fallback_ms
+    return int(round((float(system_ts) + clock_offset_us) / 1000.0))
+
+
+# ---------------------------
+# NOTIFICATIONS AND STREAM ERRORS (QC log, into <sid>_gaze.json)
+# ---------------------------
+notifications = []
+_NOTIFICATION_NAMES = [n for n in dir(tr) if n.startswith("EYETRACKER_NOTIFICATION_")]
+
+
+def _note(kind: str, payload) -> None:
+    if len(notifications) >= 500:
+        return
+    try:
+        detail = dict(payload) if isinstance(payload, dict) else str(payload)
+    except Exception:  # noqa: BLE001
+        detail = repr(payload)
+    notifications.append({"unix_time": int(time.time() * 1000), "type": kind, "detail": detail})
+    print(f"[tobii] {kind}: {detail}", flush=True)
+
+
+def _make_notification_callback(kind: str):
+    return lambda data: _note(kind, data)
+
+
+def _stream_error_callback(data):
+    _note("stream_error", data)
+
+
+# ---------------------------
+# EYE OPENNESS (optional stream, newer SDKs / devices only; NOT the Pro Spark)
 # ---------------------------
 latest_openness = {"left": None, "right": None, "left_valid": None, "right_valid": None}
 openness_supported = False
 
 
+openness_samples = 0
+
+
 def openness_callback(data):
+    global openness_samples
+    openness_samples += 1
     latest_openness["left"] = data.get("left_eye_openness_value")
     latest_openness["right"] = data.get("right_eye_openness_value")
     latest_openness["left_valid"] = data.get("left_eye_validity")
@@ -155,6 +237,15 @@ def _origin(gaze_data, side):
     if not o or (ok is not None and not ok) or not all(_finite(v) for v in o):
         return (None, None, None)
     return tuple(float(v) for v in o)
+
+
+def _gaze_ucs(gaze_data, side):
+    """(x, y, z) of where an eye looks on the screen plane, user coordinates, mm."""
+    g = gaze_data.get(f"{side}_gaze_point_in_user_coordinate_system")
+    ok = gaze_data.get(f"{side}_gaze_point_validity")
+    if not g or (ok is not None and not ok) or not all(_finite(v) for v in g):
+        return (None, None, None)
+    return tuple(float(v) for v in g)
 
 
 # ---------------------------
@@ -184,6 +275,8 @@ def gaze_data_callback(gaze_data):
         right_pupil = generate_mock_pupil()
         left_valid = right_valid = False
         lox = loy = loz = rox = roy = roz = None
+        lgx = lgy = lgz = rgx = rgy = rgz = None
+        left_pupil_valid = right_pupil_valid = False
         device_ts = system_ts = None
     else:
         left_gaze_x, left_gaze_y = gaze_data.get('left_gaze_point_on_display_area', (None, None))
@@ -194,8 +287,15 @@ def gaze_data_callback(gaze_data):
         right_valid = gaze_data.get('right_gaze_point_validity')
         lox, loy, loz = _origin(gaze_data, "left")
         rox, roy, roz = _origin(gaze_data, "right")
+        lgx, lgy, lgz = _gaze_ucs(gaze_data, "left")
+        rgx, rgy, rgz = _gaze_ucs(gaze_data, "right")
+        left_pupil_valid = bool(gaze_data.get('left_pupil_validity', False))
+        right_pupil_valid = bool(gaze_data.get('right_pupil_validity', False))
         device_ts = gaze_data.get('device_time_stamp')
         system_ts = gaze_data.get('system_time_stamp')
+
+    callback_unix_time = unix_time
+    unix_time = to_unix_ms(system_ts, callback_unix_time)
 
     # Head position: the mean of the two eye origins, in the tracker's user
     # coordinate system (mm; z is the distance from the screen plane). Free with
@@ -249,9 +349,9 @@ def gaze_data_callback(gaze_data):
     else:
         smoothed_x = smoothed_y = None
 
-    # Average pupil (NaN when the eye is not tracked)
-    left_pupil = float(left_pupil) if _finite(left_pupil) else None
-    right_pupil = float(right_pupil) if _finite(right_pupil) else None
+    # Average pupil (NaN when the eye is not tracked; the Tobii also flags it)
+    left_pupil = float(left_pupil) if (_finite(left_pupil) and (left_pupil_valid or use_mock_data)) else None
+    right_pupil = float(right_pupil) if (_finite(right_pupil) and (right_pupil_valid or use_mock_data)) else None
     if left_pupil is not None and right_pupil is not None:
         avg_pupil = (left_pupil + right_pupil) / 2
     else:
@@ -316,6 +416,15 @@ def gaze_data_callback(gaze_data):
         "system_time_stamp": system_ts,
         "left_openness": latest_openness["left"],
         "right_openness": latest_openness["right"],
+        # 2 Nov 2026: per-eye 3D gaze point and origin (user coordinate system, mm),
+        # per-eye pupil validity, and the callback's own clock for comparison
+        "callback_unix_time": callback_unix_time,
+        "left_gaze_ucs_x": lgx, "left_gaze_ucs_y": lgy, "left_gaze_ucs_z": lgz,
+        "right_gaze_ucs_x": rgx, "right_gaze_ucs_y": rgy, "right_gaze_ucs_z": rgz,
+        "left_origin_x": lox, "left_origin_y": loy, "left_origin_z": loz,
+        "right_origin_x": rox, "right_origin_y": roy, "right_origin_z": roz,
+        "left_pupil_valid": left_pupil_valid,
+        "right_pupil_valid": right_pupil_valid,
     })
 
 # Subscribe
@@ -330,6 +439,24 @@ if not use_mock_data:
         print("Eye openness stream: on")
     except Exception as exc:
         print(f"Eye openness stream: not available ({exc})")
+    # Every notification the installed SDK knows about, plus stream errors. Cheap,
+    # silent when nothing happens, and the only way to tell "tracker dropped off
+    # the USB" from "player left the room" afterwards.
+    _subscribed_notifications = []
+    for name in _NOTIFICATION_NAMES:
+        try:
+            my_eyetracker.subscribe_to(getattr(tr, name),
+                                       _make_notification_callback(name[len("EYETRACKER_NOTIFICATION_"):].lower()),
+                                       as_dictionary=True)
+            _subscribed_notifications.append(name)
+        except Exception:
+            pass
+    if hasattr(tr, "EYETRACKER_STREAM_ERRORS"):
+        try:
+            my_eyetracker.subscribe_to(tr.EYETRACKER_STREAM_ERRORS, _stream_error_callback, as_dictionary=True)
+        except Exception:
+            pass
+    print(f"Notifications: {len(_subscribed_notifications)} kinds subscribed")
 
 
 def tracker_info():
@@ -337,7 +464,12 @@ def tracker_info():
     info = {
         "screen_px": [screen_width, screen_height],
         "mock": use_mock_data,
-        "eye_openness": openness_supported,
+        # True only when the device actually sent openness samples. The subscribe
+        # call succeeds on a Pro Spark, which has no such stream.
+        "eye_openness": bool(openness_supported and openness_samples > 0),
+        "eye_openness_subscribed": openness_supported,
+        "eye_openness_samples": openness_samples,
+        "sdk_version": getattr(tr, "__version__", None),
     }
     if my_eyetracker is None:
         return info
@@ -379,11 +511,22 @@ try:
 # SAVE + PLOT
 # ---------------------------
 finally:
+    clock_offset_end_us = measure_clock_offset_us() if my_eyetracker is not None else None
     if my_eyetracker is not None:
         my_eyetracker.unsubscribe_from(tr.EYETRACKER_GAZE_DATA, gaze_data_callback)
         if openness_supported:
             try:
                 my_eyetracker.unsubscribe_from(tr.EYETRACKER_EYE_OPENNESS_DATA, openness_callback)
+            except Exception:
+                pass
+        for name in _NOTIFICATION_NAMES:
+            try:
+                my_eyetracker.unsubscribe_from(getattr(tr, name))
+            except Exception:
+                pass
+        if hasattr(tr, "EYETRACKER_STREAM_ERRORS"):
+            try:
+                my_eyetracker.unsubscribe_from(tr.EYETRACKER_STREAM_ERRORS)
             except Exception:
                 pass
 
@@ -393,6 +536,9 @@ finally:
         # Save CSV
         csv_path = str(session.stream_path("gaze"))
         df = pd.DataFrame(gaze_data_list)
+        if openness_samples == 0:
+            # No device-side openness: do not ship two empty columns per sample.
+            df = df.drop(columns=[c for c in ("left_openness", "right_openness") if c in df])
         df.to_csv(csv_path, index=False)
 
         valid = df["gaze_valid"].mean() if "gaze_valid" in df else float("nan")
@@ -409,13 +555,22 @@ finally:
                                         if df["head_dist_mm"].notna().any() else None),
                 "head_distance_warnings": _head_warnings,
                 "head_distance_band_mm": [HEAD_MIN_MM, HEAD_MAX_MM],
+                # unix_time = (system_time_stamp + clock_offset_start_us) / 1000
+                "clock_source": "tracker system clock" if clock_offset_us is not None else "callback time",
+                "clock_offset_start_us": clock_offset_us,
+                "clock_offset_end_us": clock_offset_end_us,
+                "clock_drift_ms": (round((clock_offset_end_us - clock_offset_us) / 1000.0, 2)
+                                   if clock_offset_us is not None and clock_offset_end_us is not None else None),
+                "callback_jitter_ms_sd": (round(float((df["unix_time"] - df["callback_unix_time"]).std()), 2)
+                                          if clock_offset_us is not None else None),
+                "notifications": notifications,
                 # samples per second actually written, against the tracker's rate:
                 # with invalid rows kept this should match frequency_hz
                 "samples_per_s": (round(len(df) * 1000 / max(1, int(df["unix_time"].iloc[-1] - df["unix_time"].iloc[0])), 1)
                                   if len(df) > 1 else None),
             })
             json_path = session.stream_path("gaze", ext="json")
-            json_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+            json_path.write_text(json.dumps(info, indent=2, default=str), encoding="utf-8")
             print(f"Tracker info saved: {json_path}")
         except Exception as exc:
             print(f"Could not write the tracker info: {exc}")

@@ -14,6 +14,11 @@ Exit code 1 if anything the capture cannot run without is missing; 0 otherwise.
 
 Added 2026-09 (iteration 5).
 
+Modified 2026-10-27: capture tiers. Without an eye tracker the rig runs *lite*
+(video, input, audio, game state) and the gaze/emotion/ring lines are informational,
+not blocking; PLAYSMART_TIER=full makes the tracker mandatory again (lab rigs). Any
+screen resolution is accepted; what matters is that OBS records the screen 1:1.
+
 Modified 2026-10-14, after the 28 Sep sessions: checks the PC clock against a time
 server (rigs were up to 5 s apart), the League client's minimap scale against the rig
 standard (it ranged 0.3-1.5 across rigs, so the same look landed on minimaps of very
@@ -48,6 +53,8 @@ _failures = 0
 STANDARD_MINIMAP_SCALE = 1.0
 STANDARD_HUD_SCALE = None            # not enforced yet; reported
 STANDARD_OBS_FPS = 60
+ACCEPTED_OBS_FPS = (30, 60)
+TIER = "full"                        # resolved in main() before the hardware checks
 CLOCK_MAX_OFFSET_S = 0.5             # between this PC and the time server
 NTP_SERVER = os.environ.get("PLAYSMART_NTP_SERVER", "time.windows.com")
 
@@ -60,8 +67,7 @@ def report(flag: str, name: str, detail: str = "") -> None:
 
 
 def skipped(label: str) -> bool:
-    skip = {p.strip().lower() for p in os.environ.get("PLAYSMART_SKIP", "").split(",") if p.strip()}
-    return label in skip
+    return label in session.skip_set(TIER)
 
 
 # ---------------------------------------------------------------- environment
@@ -74,19 +80,22 @@ def check_python() -> None:
 
 
 def check_imports() -> None:
-    needed = ["tobii_research", "pygame", "pynput", "keyboard", "sounddevice", "soundfile",
+    needed = ["pygame", "pynput", "keyboard", "sounddevice", "soundfile",
               "bleak", "requests", "obsws_python", "psutil", "pandas", "matplotlib",
               "paramiko", "screeninfo"]
-    missing = []
-    for name in needed:
+    hardware_only = ["tobii_research"]          # only the full tier needs it
+    missing, optional_missing = [], []
+    for name in needed + hardware_only:
         try:
             __import__(name)
         except Exception as exc:  # noqa: BLE001 - any import failure is the finding
-            missing.append(f"{name} ({type(exc).__name__})")
+            (missing if name in needed or TIER == "full" else optional_missing).append(
+                f"{name} ({type(exc).__name__})")
     if missing:
         report(FAIL, "packages", "missing: " + ", ".join(missing) + "  -> poetry install")
     else:
-        report(OK, "packages", f"{len(needed)} capture imports resolve")
+        report(OK, "packages", f"{len(needed) + len(hardware_only) - len(optional_missing)} capture imports resolve"
+               + (f"  (lite tier: {', '.join(optional_missing)} not needed)" if optional_missing else ""))
 
 
 _KEY_RE = re.compile(r"^#?\s*([A-Z][A-Z0-9_]*)=(.*)$")
@@ -208,8 +217,7 @@ def check_display() -> None:
         return
     primary = monitors[0]
     detail = f"{primary.width}x{primary.height}" + (f", {len(monitors)} monitors" if len(monitors) > 1 else "")
-    flag = OK if (primary.width, primary.height) in ((1920, 1080), (2560, 1440)) else WARN
-    report(flag, "display", detail + ("" if flag is OK else "  (rigs are 1920x1080 or 2560x1440; OBS output must be 1920x1080)"))
+    report(OK, "display", detail + "  (every stream and the OBS canvas must use this size - see 'obs video')")
     if platform.system() == "Windows":
         try:
             import ctypes
@@ -221,16 +229,23 @@ def check_display() -> None:
 
 def check_tracker() -> None:
     if skipped("gaze"):
-        report(WARN, "eye tracker", "skipped via PLAYSMART_SKIP")
+        report(WARN, "eye tracker", "off (lite tier)" if TIER == "lite" else "skipped via PLAYSMART_SKIP")
         return
     try:
         import tobii_research as tr
         trackers = tr.find_all_eyetrackers()
     except Exception as exc:  # noqa: BLE001
-        report(FAIL, "eye tracker", f"tobii_research failed ({exc})")
+        if TIER == "lite":
+            report(WARN, "eye tracker", f"tobii_research unavailable ({type(exc).__name__}) -> lite tier")
+        else:
+            report(FAIL, "eye tracker", f"tobii_research failed ({exc})")
         return
     if not trackers:
-        report(FAIL, "eye tracker", "none found - USB, Tobii service, or Eye Tracker Manager holding it")
+        if TIER == "lite":
+            report(WARN, "eye tracker", "none found -> lite tier: no gaze or face this session "
+                   "(PLAYSMART_TIER=full to require one)")
+        else:
+            report(FAIL, "eye tracker", "none found - USB, Tobii service, or Eye Tracker Manager holding it")
         return
     t = trackers[0]
     try:
@@ -241,8 +256,9 @@ def check_tracker() -> None:
 
 
 def check_openface() -> None:
-    if os.environ.get("PLAYSMART_OPENFACE", "1") == "0" or skipped("emotion"):
-        report(WARN, "openface", "disabled (PLAYSMART_OPENFACE=0 / PLAYSMART_SKIP) - no emotion stream")
+    if os.environ.get("PLAYSMART_OPENFACE", "1") == "0" or skipped("face"):
+        why = "lite tier" if TIER == "lite" else "PLAYSMART_OPENFACE=0 / PLAYSMART_SKIP"
+        report(WARN, "openface", f"off ({why}) - no face stream (action units, head pose)")
         return
     exe = REPO / "OpenFace_2.2.0_win_x64" / "FeatureExtraction.exe"
     if not exe.is_file():
@@ -253,7 +269,9 @@ def check_openface() -> None:
     if len(cen) < 4:
         report(FAIL, "openface models", f"{len(cen)} cen_patches_*.dat in model\\patch_experts - run download_models.ps1 inside the OpenFace folder")
     else:
-        report(OK, "openface", f"binary and {len(cen)} CEN patch-expert models present")
+        cam = os.environ.get("PLAYSMART_FACE_CAM", "640x480")
+        report(OK, "openface", f"binary and {len(cen)} CEN patch-expert models present; "
+               f"face stream at {cam} (-aus -pose -gaze, no images)")
     try:
         import psutil
         stale = [p.pid for p in psutil.process_iter(["name"]) if "FeatureExtraction" in (p.info.get("name") or "")]
@@ -290,7 +308,7 @@ def check_microphone(sample: bool) -> None:
 
 def check_ring(scan: bool) -> None:
     if skipped("eda"):
-        report(WARN, "eda ring", "skipped via PLAYSMART_SKIP=eda")
+        report(WARN, "eda ring", "off (lite tier)" if TIER == "lite" else "skipped via PLAYSMART_SKIP=eda")
         return
     if not scan:
         report(WARN, "eda ring", "scan skipped (--no-ble)")
@@ -322,6 +340,15 @@ def check_ring(scan: bool) -> None:
 
 # ------------------------------------------------------------------ software
 
+def _primary_screen():
+    try:
+        import screeninfo
+        m = screeninfo.get_monitors()[0]
+        return int(m.width), int(m.height)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def check_obs() -> None:
     if os.environ.get("PLAYSMART_OBS", "1") == "0":
         report(WARN, "obs", "disabled (PLAYSMART_OBS=0) - no video")
@@ -338,7 +365,8 @@ def check_obs() -> None:
         report(FAIL, "obs", "obsws-python not installed - poetry install")
         return
     except Exception as exc:  # noqa: BLE001
-        report(FAIL, "obs", f"cannot connect ({type(exc).__name__}: {exc}) - OBS open? WebSocket enabled? password?")
+        report(FAIL, "obs", f"cannot connect ({type(exc).__name__}: {exc}) - OBS open? WebSocket enabled? "
+               "password?  `python src\\rig_setup.py` configures OBS and starts it")
         return
     try:
         ver = c.get_version()
@@ -352,14 +380,15 @@ def check_obs() -> None:
         fps = vs.fps_numerator / max(vs.fps_denominator, 1)
         res = f"{vs.base_width}x{vs.base_height} -> {vs.output_width}x{vs.output_height} @ {fps:.0f} fps"
         problems = []
-        if (vs.output_width, vs.output_height) != (1920, 1080):
-            problems.append("output 1920x1080")
-        if (vs.base_width, vs.base_height) != (vs.output_width, vs.output_height) and vs.output_width < 1920:
-            problems.append("output smaller than the canvas")
-        if abs(fps - STANDARD_OBS_FPS) > 0.5:
-            problems.append(f"{STANDARD_OBS_FPS} fps")
+        screen = _primary_screen()
+        if screen and (vs.base_width, vs.base_height) != screen:
+            problems.append(f"canvas should be the screen ({screen[0]}x{screen[1]})")
+        if (vs.output_width, vs.output_height) != (vs.base_width, vs.base_height):
+            problems.append("output should equal the canvas (no downscale: the minimap becomes unreadable)")
+        if not any(abs(fps - f) <= 0.5 for f in ACCEPTED_OBS_FPS):
+            problems.append("30 or 60 fps")
         flag = OK if not problems else WARN
-        report(flag, "obs video", res + ("" if flag is OK else "  (rig standard: " + ", ".join(problems) + "; load obs settings/PlaySmart_League.json)"))
+        report(flag, "obs video", res + ("" if flag is OK else "  (" + "; ".join(problems) + " - `python src\\rig_setup.py` sets it)"))
         try:
             scene = c.get_current_program_scene().current_program_scene_name
             items = c.get_scene_item_list(scene).scene_items
@@ -436,11 +465,13 @@ def check_league_settings() -> None:
     gen = gs.get("General") or {}
     scale = hud.get("MinimapScale")
     try:
-        flag = OK if abs(float(scale) - STANDARD_MINIMAP_SCALE) < 0.01 else FAIL
+        on_standard = abs(float(scale) - STANDARD_MINIMAP_SCALE) < 0.01
+        flag = OK if on_standard else (FAIL if TIER == "full" else WARN)
     except (TypeError, ValueError):
         flag = WARN
     report(flag, "minimap scale", f"MinimapScale {scale}"
-           + ("" if flag is OK else f"  -> set {STANDARD_MINIMAP_SCALE:.1f} in Settings > Interface (rig standard)"))
+           + ("" if flag is OK else f"  -> rig standard is {STANDARD_MINIMAP_SCALE:.1f} (Settings > Interface); "
+              "the recorder stores your value, so analysis can still map the minimap"))
     extras = {k: hud.get(k) for k in ("GlobalScale", "ChatScale") if k in hud}
     extras.update({k: gen.get(k) for k in ("Width", "Height", "WindowMode") if k in gen})
     if extras:
@@ -466,12 +497,12 @@ def check_minimap_rect() -> None:
 
 
 def check_streams() -> None:
-    """One line saying which streams this rig will write - so 'no emotion' is a
+    """One line saying which streams this rig will write - so 'no face' is a
     decision made before the game, not a discovery after it."""
-    streams = ["gamestate", "gaze", "emotion", "input", "audio", "eda", "video"]
+    streams = ["gamestate", "gaze", "face", "input", "audio", "eda", "video"]
     disabled = {
         "gaze": skipped("gaze"),
-        "emotion": skipped("emotion") or os.environ.get("PLAYSMART_OPENFACE", "1") == "0",
+        "face": skipped("face") or os.environ.get("PLAYSMART_OPENFACE", "1") == "0",
         "input": skipped("input"),
         "audio": skipped("audio"),
         "eda": skipped("eda"),
@@ -479,8 +510,8 @@ def check_streams() -> None:
     }
     off = [s for s in streams if disabled.get(s)]
     on = [s for s in streams if s not in off]
-    report(WARN if off else OK, "streams", "recording: " + ", ".join(on)
-           + (f"   NOT recording: {', '.join(off)}" if off else ""))
+    report(OK, "streams", f"tier {TIER}: recording " + ", ".join(on)
+           + (f"   not recording: {', '.join(off)}" if off else ""))
 
 
 def check_league() -> None:
@@ -522,6 +553,11 @@ def main() -> None:
     if args.env_only:
         check_env_file(fix=args.fix_env)
         raise SystemExit(1 if _failures else 0)
+    global TIER
+    TIER = session.resolve_tier()
+    want = session.tier_wanted()
+    report(OK, "tier", f"{TIER}" + ("  (PLAYSMART_TIER=auto: lite when no eye tracker is found)" if want == "auto"
+                                     else f"  (PLAYSMART_TIER={want})"))
     check_python()
     check_imports()
     check_env_file(fix=args.fix_env)
@@ -542,7 +578,10 @@ def main() -> None:
     if _failures:
         print(f"{_failures} blocking problem(s) above. Fix them before pressing F7.")
         raise SystemExit(1)
-    print("Ready to capture. Calibrate the player, then run main.bat / key_listener.py and press F7.")
+    if TIER == "full":
+        print("Ready to capture. Calibrate the player, then run main.bat / key_listener.py and press F7.")
+    else:
+        print("Ready to capture (lite tier). Run main.bat / key_listener.py and press F7.")
 
 
 if __name__ == "__main__":

@@ -180,9 +180,21 @@ Pass: `ok clock mapping` with a `warn` line for the +30 s skip; gaze `> 85 %` va
 
 Expected sizes for a 5-minute game: gaze ~1.5–4 MB (tracker rate × 300 s, 100 % valid);
 audio ≈ 5.3 MB per minute (44.1 kHz mono 16-bit) so ~26 MB — **anything near 44 bytes
-is the old bug back**; gamestate ~600 rows; input a few thousand rows; emotion CSV, if
-OpenFace ran, ~95 % `Neutral` (known classifier limitation, not a capture failure); video
-tens to a few hundred MB depending on encoder bitrate.
+is the old bug back**; gamestate ~600 rows; input a few thousand rows; face CSV, if
+OpenFace ran, ~15–30 rows/s with ~56 columns (action units, head pose, webcam gaze,
+eyelid aperture — no emotion label since 2 Nov 2026) and `face tracked on > 90 %`;
+video tens to a few hundred MB depending on encoder bitrate.
+
+### T4b — face stream timing and blink cross-check (5 min, when OpenFace is on)
+
+`check_session.py` prints, under `face`, the frame rate OpenFace achieved next to League
+(below 15 fps: lower `PLAYSMART_FACE_CAM`), the blink rate from AU45, and the correlation
+between the eyelid aperture and AU45 — it must be clearly negative, otherwise the
+eye-landmark index layout assumed in `Emotion_gaze_visualization.py` is wrong for this
+OpenFace build. Then open `data\face\<sid>_face.json`: `anchor_source` should be
+`starting_tracking_line` and `anchor_check_minus_anchor_ms` within about ±100 ms. Blink
+for the camera three times at a known game clock and confirm the AU45 onsets land on it
+in `_face.csv` (via `unix_time` → the gamestate clock mapping).
 
 ### T5 — video timing acceptance test (5 min)
 
@@ -219,7 +231,7 @@ when OBS actually started). Reopen OBS afterwards.
 ### T8 — the Tobii double-subscription question (5 min, optional)
 
 `eye_tracking_script.py` and `Emotion_gaze_visualization.py` both subscribe to the same
-tracker. Whether that costs samples has never been measured: set `PLAYSMART_SKIP=emotion`
+tracker. Whether that costs samples has never been measured: set `PLAYSMART_SKIP=face`
 in `.env`, run a 2-minute game, note the gaze Hz from `check_session.py`, remove the
 setting. Same rate (±5 %) as T4 clears the suspicion; a lower rate with the overlay
 running is a finding.
@@ -288,8 +300,11 @@ reports the clock mapping as absent rather than failing.
 - `Upload : 4 exists` on a re-run — already on the server with the same size, not re-sent.
 - `WITH BOTS` and `PRACTICETOOL` in the report — Practice Tool has no Riot match id, so no
   Match-V5 timeline will ever attach to these sessions; fine for testing the pipeline.
-- Emotion ~95 % `Neutral` — `map_emotion()` requires several action units to fire at once
-  and returns Neutral otherwise; documented limitation.
+- No emotion column anywhere since 2 Nov 2026 — the `face` stream records action units,
+  head pose and webcam gaze and leaves interpretation to analysis. (Pre-November `emotion`
+  files: ~95 % `Neutral` was `map_emotion()` needing 3–5 AUs at once, not a capture fault.)
+- `face` rows with `success` 0 and zeros everywhere — OpenFace lost the face (player leaned
+  out of frame); the merge blanks those measurements.
 - `unix_time_ms` on the events stream is stamped when the poll *saw* the event; use
   `game_time_s` on that stream.
 - `exited cleanly but wrote nothing` for a skipped or absent sensor — the report working.
@@ -298,10 +313,16 @@ reports the clock mapping as absent rather than failing.
 ## 7. Real blockers
 
 - **Consent.** No participant other than yourself until informed consent for gaze, face,
-  voice and physiology is in place. EU AI Act Art 5(1)(f) restricts emotion inference from
-  biometric data in education settings; the research exemption needs a decision from the
-  DPO, not from us. Test sessions are on yourself, and they still contain your face
-  (OpenFace `output/`), voice and gaze — `data/` and `output/` stay out of git.
+  voice and physiology is in place. EU AI Act Art 5(1)(f) prohibits *inferring emotions*
+  from biometric data in education settings; the Commission's guidelines leave detecting
+  expressions and physical states (fatigue, blinks) outside it, which is why the rig now
+  records action units and head pose and no emotion label — but recording a student's face
+  measurements is still biometric personal data under the GDPR, and whether the research
+  exemption applies is a decision for the DPO, not for us. Test sessions are on yourself,
+  and they still contain your face measurements, voice and gaze — `data/` and `output/`
+  stay out of git. OpenFace never writes face images or video here (no `-simalign`,
+  `-hogalign`, `-tracked`, no 68-point face landmarks); its scratch folder is deleted at
+  the end of every session.
 - **`data/json/ign_mapping.json`** maps Riot IDs to participant numbers. It is the
   re-identification key: it stays on the capture PC, is never uploaded, never committed.
 - The SFTP password must be rotated on the server; the old one is in this repository's

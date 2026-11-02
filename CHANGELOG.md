@@ -193,3 +193,25 @@ rig side, and the change for each:
   notebooks: untouched, now behind optional dependency groups.
 - Both `eye_tracking_script.py` and `Emotion_gaze_visualization.py` subscribe to the
   same Tobii. Untested whether that costs samples (`TESTING.md` T8).
+
+### Face stream and Tobii completeness (2 Nov 2026)
+
+Follow-up to the capture-completeness check (`claude/capture-completeness-2026-11-02.md`):
+the OpenFace *emotion* stream becomes a *face* stream, and the Tobii recorder keeps the
+rest of what the tracker sends. Same changes in `PlaySmart-app` (rig) and the team
+repository (merge). **Untested on the lab hardware**; tested against a fake OpenFace and
+a fake tracker. Run T4 and T4b once after pulling.
+
+| file | change | reason |
+|---|---|---|
+| `src/Emotion_gaze_visualization.py` rewritten | OpenFace runs with `-aus -pose -gaze` (never `-simalign`, `-hogalign`, `-tracked`, `-2Dfp`, `-3Dfp`). New stream **`data/face/<sid>_face.csv`**: 17 AU intensities, 18 AU presences, head pose (mm, rad), webcam gaze vectors and angles, tracking `confidence`/`success`, and per-eye `eye_aperture_0/1` (eye aspect ratio from the 12-point eyelid contour; the 56 eye landmarks themselves are dropped unless `PLAYSMART_FACE_KEEP_LANDMARKS=1`). `<sid>_face.json`: fps, success share, the clock anchor and its cross-check. `map_emotion()` and the seven labels are gone. Clock anchor taken when OpenFace prints `Starting tracking` (its `timestamp` counts from the webcam opening, after model load), cross-checked against row arrival times; the old code anchored on the script start and stamped every row seconds early. Per-session scratch folder `output/<sid>/`, deleted at the end. stderr to a log file instead of an unread pipe. Overlay readout shows tracking state and fps. NaN-guarded gaze dot. Stop is serialised with a lock (the stop thread and `finally` raced). `PLAYSMART_FACE_CAM`, `PLAYSMART_FACE_DEVICE`, `PLAYSMART_OPENFACE_EXE`. | The label was 95 % Neutral and the one thing in the stack that Art. 5(1)(f) is about; the AUs it was computed from were never kept. No face image or geometry is written. |
+| `src/eye_tracking_script.py` | `unix_time` = Tobii `system_time_stamp` + one clock offset (median of 25 paired readings at start; re-measured at the end, drift in the json); `callback_unix_time` kept for comparison. Per-eye 3D gaze point and origin in user coordinates (`*_gaze_ucs_*`, `*_origin_*`), per-eye pupil validity. Openness columns dropped when no openness sample arrived; the json's `eye_openness` is now "samples arrived", not "subscribe succeeded". Every `EYETRACKER_NOTIFICATION_*` the installed SDK knows, plus stream errors, logged into the json with a timestamp. | Callback time jittered 25 ms SD against the tracker clock on the 26 Oct session. Visual angle and I-VT need the 3D vectors. The Pro Spark has no openness stream, and every json said it did. |
+| `src/session.py`, `src/key_listener.py`, `src/pop_up_screen.py`, `src/preflight.py`, `src/probe.py`, `.env.example` | Stream renamed `face` everywhere; `emotion` still accepted in `PLAYSMART_SKIP`. Upload map gains `/data/face/` (server directory to create). Status counter `face_rows`. `.env.example` recommends `PLAYSMART_SKIP=eda` with the consent note. | |
+| `src/check_session.py` | `face`: tracked share, fps (warns below 15), AU45 blink rate, and the aperture-vs-AU45 correlation (must be negative; verifies the eyelid landmark indices), head-pose spread. Legacy `emotion` block kept. | |
+| team repo `merge/streams.py` | `load_face()` (zeros on frames without a face become NaN; no label derived), `derive_blinks()` / `blink_table()` (both eyes lost 70–500 ms), `load_gaze()` keeps the new per-eye columns and adds `blink`. | |
+| team repo `merge/game.py`, `merge/sessions.py` | `players.parquet` gains `blinks` per bin and per-bin means of the face measurements (`face_tracked`, `AU*`, `pose_*`, `gaze_angle_*`, `eye_aperture`); `streams/<player>_blinks`; `game.json` gaze quality gains `blinks`, `blinks_per_min`. `face` discovered as a stream. | |
+| `TESTING.md`, `docs/postgame-pipeline.md`, `docs/capture-rig-setup-and-testing.md` | T4b (face timing and blink cross-check), consent paragraph rewritten around inference vs. measurement, column tables updated. | |
+
+Still waiting on the DPO and the consent form before the face stream runs for anyone but
+the team. The `.env` on the lab PCs still has `PLAYSMART_SKIP=eda,emotion`, which now also
+skips `face`; change it to `eda` only when consent is in place.

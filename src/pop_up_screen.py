@@ -8,7 +8,7 @@ line to ``data/sessions.csv``.
 
 This used to be the weakest link in the pipeline. It asked the operator for a
 player name and a game from a dropdown, then went looking for the newest
-un-renamed file in each of data/gaze, data/input, data/emotion and data/eda and
+un-renamed file in each of data/gaze, data/input, data/face and data/eda and
 assumed those belonged together. They frequently did not: if a recorder crashed,
 the previous session's leftover file was the newest one and got adopted into
 this session. The archive has a merged file whose gaze data is 2.6 hours from
@@ -60,7 +60,8 @@ UPLOAD_LOG = "upload_log.csv"
 UPLOAD_MAP = {
     "gaze": "/data/gaze/",
     "input": "/data/input/",
-    "emotion": "/data/emotion/",
+    "face": "/data/face/",          # 2026-11-02: OpenFace stream; the server dir may not exist yet
+    "emotion": "/data/emotion/",    # legacy label stream, pre-November sessions only
     "eda": "/data/eda/",
     "audio": "/data/audio/",
     "gamestate": "/data/gamestate/",
@@ -224,6 +225,8 @@ def write_manifest(sid, files, meta):
         "game_key": (f"{meta.get('platform_id') or 'UNKNOWN'}_{meta['game_id']}"
                      if meta.get("game_id") else ""),
         "participant_id": meta.get("participant_id", ""),
+        "capture_tier": meta.get("capture_tier", ""),
+        "streams_skipped": meta.get("streams_skipped", []),
         "files": entries,
     }
     path = session.stream_dir("gamestate") / f"{sid}_manifest.json"

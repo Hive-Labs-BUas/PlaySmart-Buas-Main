@@ -64,7 +64,7 @@ REPO = SRC.parent
 # the same moment as everything else.
 RECORDERS = [
     ("gaze", "src/eye_tracking_script.py", 0.0),
-    ("emotion/overlay", "src/Emotion_gaze_visualization.py", 0.0),
+    ("face/overlay", "src/Emotion_gaze_visualization.py", 0.0),  # OpenFace AUs/pose/gaze + gaze dot
     ("input", "src/keyboard_recording.py", 0.0),
     ("audio", "src/microphone_recording.py", 0.0),
     ("eda", "src/nuanic_eda.py", 2.0),
@@ -75,12 +75,26 @@ RECORDERS = [
 # Without this, a missing sensor makes the end-of-session report show a red line
 # on every single capture, and a check that is always red is a check nobody
 # reads. That is precisely how the old pipeline hid a year of data loss.
-SKIP = {part.strip().lower() for part in os.environ.get("PLAYSMART_SKIP", "").split(",")
-        if part.strip()}
+#
+# Modified 2026-10-27: the set is resolved per capture by session.skip_set(), which
+# adds gaze/emotion/eda when the rig runs at the lite tier (no eye tracker). A
+# player's own PC therefore records video + input + audio + game state cleanly
+# instead of reporting a dead gaze recorder every game.
+SKIP: set = set()
+
+
+def resolve_tier() -> str:
+    """Decide full/lite for this capture and publish it to the recorders."""
+    global SKIP
+    os.environ.pop(session.ENV_TIER_RESOLVED, None)
+    tier = session.resolve_tier()
+    os.environ[session.ENV_TIER_RESOLVED] = tier
+    SKIP = session.skip_set(tier)
+    return tier
 
 
 def active_recorders() -> list:
-    """RECORDERS minus anything named in PLAYSMART_SKIP."""
+    """RECORDERS minus anything named in PLAYSMART_SKIP (plus the lite tier's set)."""
     return [entry for entry in RECORDERS
             if entry[0].lower() not in SKIP and entry[0].split("/")[0].lower() not in SKIP]
 
@@ -127,6 +141,9 @@ def child_env(sid: str) -> dict:
     env[session.ENV_SESSION] = sid
     env[session.ENV_STOP] = str(session.stop_path())
     env.setdefault(session.ENV_DATA, str(session.data_dir()))
+    # Children see the full skip set, so a recorder started anyway (or pop_up_screen's
+    # file inventory) knows which streams were never meant to exist this session.
+    env[session.ENV_SKIP] = ",".join(sorted(SKIP))
     return env
 
 
@@ -135,14 +152,19 @@ def start_recorders(sid: str, dry_run: bool) -> list:
     env = child_env(sid)
     started = []
     if SKIP:
-        print(f"  skipping (PLAYSMART_SKIP): {', '.join(sorted(SKIP))}")
+        why = "lite tier + PLAYSMART_SKIP" if os.environ.get(session.ENV_TIER_RESOLVED) == "lite" else "PLAYSMART_SKIP"
+        print(f"  skipping ({why}): {', '.join(sorted(SKIP))}")
     for label, script, delay in active_recorders():
         if delay:
             time.sleep(delay)
         if dry_run:
             cmd = [sys.executable, str(SRC / "_stub_recorder.py"), label]
         else:
-            cmd = ["poetry", "run", "python", script]
+            # The interpreter running this orchestrator is the project's environment
+            # (poetry's venv, or the packaged rig's bundled Python). Launching children
+            # with it directly saves ~2 s of `poetry run` startup per recorder and
+            # removes the dependency on poetry being on PATH (packaged rig, 2026-10-27).
+            cmd = [sys.executable, str(REPO / script)]
         try:
             proc = subprocess.Popen(cmd, cwd=str(REPO), env=env)
         except OSError as exc:
@@ -293,6 +315,64 @@ def report_meta(sid: str) -> None:
         print("  !! no game id in the meta - the replay must be matched by roster")
 
 
+def _rows_estimate(path: Path, cache: dict) -> int:
+    """Rows in a growing CSV from its size and the average length of its first lines.
+
+    Counting lines of a 50 MB input log every two seconds would cost more than the
+    capture; size / mean line length is within a few percent and free.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if path not in cache:
+        try:
+            with open(path, "rb") as fh:
+                head = [fh.readline() for _ in range(201)]
+            lines = [ln for ln in head[1:] if ln]
+            cache[path] = (sum(len(ln) for ln in lines) / len(lines)) if lines else 0
+            cache["hdr_" + str(path)] = len(head[0]) if head else 0
+        except OSError:
+            return 0
+    avg = cache.get(path) or 0
+    return int(max(0, size - cache.get("hdr_" + str(path), 0)) / avg) if avg else 0
+
+
+def status_ticker(sid: str, obs_handle, tier: str, stop: threading.Event, every: float = 2.0) -> None:
+    """While a game is recorded, publish what each stream has captured so far.
+
+    Written to rig_status.json as ``counters`` (added 2026-10-28 for the app's in-game
+    screen): video seconds since OBS's frame zero, input events, game-state polls, audio
+    seconds (WAV bytes at 44.1 kHz mono 16-bit), gaze samples on a full rig. Streams that
+    this rig does not record are listed as ``null`` so the app can say so.
+    """
+    cache: dict = {}
+    data = session.data_dir()
+    skips = session.skip_set(tier)
+    while not stop.is_set():
+        c = {
+            "video_s": None, "input_events": None, "gamestate_rows": None, "audio_s": None, "gaze_rows": None,
+            "face_rows": None,
+        }
+        if obs_handle and obs_handle.get("t0_unix_ms"):
+            c["video_s"] = max(0, int(time.time() - obs_handle["t0_unix_ms"] / 1000))
+        if "input" not in skips:
+            c["input_events"] = _rows_estimate(data / "input" / f"{sid}_input.csv", cache)
+        c["gamestate_rows"] = _rows_estimate(data / "gamestate" / f"{sid}_gamestate.csv", cache)
+        if "audio" not in skips:
+            try:
+                c["audio_s"] = int(max(0, (data / "audio" / f"{sid}_audio.wav").stat().st_size - 44) / (44100 * 2))
+            except OSError:
+                c["audio_s"] = 0
+        if "gaze" not in skips:
+            c["gaze_rows"] = _rows_estimate(data / "gaze" / f"{sid}_gaze.csv", cache)
+        if "face" not in skips and os.environ.get("PLAYSMART_OPENFACE", "1") == "1":
+            # OpenFace writes to output/<sid>/ until the session ends; count rows there.
+            c["face_rows"] = _rows_estimate(REPO / "output" / sid / f"{sid}_face.csv", cache)
+        session.write_status(counters=c)
+        stop.wait(every)
+
+
 def wait_for_abort(abort: threading.Event, stop_flag: threading.Event) -> None:
     """Set `abort` if F12 is pressed while a capture is running."""
     try:
@@ -332,6 +412,7 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
         threading.Thread(target=wait_for_abort, args=(abort, abort), daemon=True).start()
     else:
         print("Armed — waiting for a game to start…")
+        session.write_status(state="armed", session_id="")
         watcher = threading.Thread(target=wait_for_abort, args=(abort, abort), daemon=True)
         watcher.start()
         first = liveclient.wait_for_game(abort=abort)
@@ -341,7 +422,13 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
 
     sid = session.new_session_id()
     session.adopt(sid)  # parent and children now agree on the stop-file path
+    tier = resolve_tier()
+    session.write_status(state="recording", session_id=sid, tier=tier)
     print(f"\n=== SESSION {sid} ===")
+    if tier == "lite":
+        print("  tier: lite (no eye tracker) - video, input, audio and game state only")
+    else:
+        print("  tier: full (eye tracker present)")
 
     session.clear_stop()
     if not dry_run:
@@ -375,9 +462,12 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
             daemon=True,
         ).start()
 
-    # Block until the game ends or the operator aborts.
+    # Block until the game ends or the operator aborts; meanwhile publish the counters.
+    tick_stop = threading.Event()
+    threading.Thread(target=status_ticker, args=(sid, obs_handle, tier, tick_stop), daemon=True).start()
     while not game_over.is_set() and not abort.is_set():
         time.sleep(0.2)
+    tick_stop.set()
 
     if manual and abort.is_set():
         print("F12 — session ended.")
@@ -389,13 +479,15 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
     if not dry_run and not manual:
         report_meta(sid)
 
-    if not dry_run:
+    session.write_status(state="finishing", session_id=sid)
+    if not dry_run and os.environ.get("PLAYSMART_POPUP", "1") != "0":   # the desktop app asks in its own UI
         print("Labelling and uploading…")
-        result = subprocess.run(["poetry", "run", "python", "src/pop_up_screen.py"],
+        result = subprocess.run([sys.executable, str(SRC / "pop_up_screen.py")],
                                 cwd=str(REPO), env=child_env(sid))
         print("Upload step finished." if result.returncode == 0 else "Upload step failed.")
 
     print(f"=== SESSION {sid} complete ===\n")
+    session.write_status(state="idle", last_session_id=sid, session_id="")
     return True
 
 
@@ -413,9 +505,17 @@ def main() -> None:
 
     if args.dry_run:
         args.no_arm = True
+        args.once = True   # a fake game is a smoke test, not a loop
 
     rearm = os.environ.get("PLAYSMART_REARM", "1") != "0"
     first = True
+    tier = resolve_tier()
+    session.write_status(state="starting", tier=tier, tracker=tier == "full", session_id="")
+    if tier == "lite":
+        print("Capture tier: LITE - no eye tracker found (or PLAYSMART_TIER=lite). Recording video, "
+              "input, audio and game state. Plug a Tobii in and it is picked up at the next game.")
+    else:
+        print("Capture tier: FULL - eye tracker present. Calibrate the player before each session.")
     while True:
         if not args.no_arm and (first or not rearm):
             print("Press F7 to arm (F12 aborts once a capture is running)…")
@@ -441,3 +541,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nStopped.")
+    finally:
+        session.write_status(state="stopped", session_id="")

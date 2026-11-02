@@ -28,6 +28,7 @@ Environment contract, set by ``key_listener.py``:
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,18 @@ ENV_SESSION = "PLAYSMART_SESSION_ID"
 ENV_STOP = "PLAYSMART_STOP_FILE"
 ENV_DATA = "PLAYSMART_DATA_DIR"
 ENV_GAME = "PLAYSMART_GAME"
+ENV_TIER = "PLAYSMART_TIER"                    # full | lite | auto (default)
+ENV_TIER_RESOLVED = "PLAYSMART_TIER_RESOLVED"  # set by the orchestrator for its children
+ENV_SKIP = "PLAYSMART_SKIP"
+
+# Streams that need the lab hardware. Without an eye tracker the rig runs "lite":
+# video, input, audio and game state only. Added 2026-10-27 so the same code runs
+# on a player's own PC (no Tobii, no ring, no OpenFace) without a wall of errors.
+#
+# 2026-11-02: the OpenFace stream is called ``face`` (action units, head pose, webcam
+# gaze, eyelid aperture); ``emotion`` is accepted in PLAYSMART_SKIP as its old name.
+LITE_SKIPS = {"gaze", "face", "emotion", "eda"}
+SKIP_ALIASES = {"emotion": "face", "face": "emotion"}
 
 REPO = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO / ".env"
@@ -114,6 +127,76 @@ def game() -> str:
     branch can merge into ``Dev`` without breaking the Valorant rigs.
     """
     return (os.environ.get(ENV_GAME, "league").strip().lower() or "league")
+
+
+def tracker_present() -> bool:
+    """Is a Tobii eye tracker connected right now? False when tobii_research is not installed."""
+    try:
+        import tobii_research as tr  # noqa: WPS433 - optional on lite installs
+        return bool(tr.find_all_eyetrackers())
+    except Exception:  # noqa: BLE001 - missing wheel, missing service, anything: no tracker
+        return False
+
+
+def tier_wanted() -> str:
+    """``full``, ``lite`` or ``auto`` from PLAYSMART_TIER (default auto)."""
+    want = os.environ.get(ENV_TIER, "auto").strip().lower() or "auto"
+    return want if want in ("full", "lite", "auto") else "auto"
+
+
+def resolve_tier() -> str:
+    """Which tier this capture runs at.
+
+    ``full``: the lab rig; an eye tracker is required (pre-flight fails without one).
+    ``lite``: video + input + audio + game state; no gaze, emotion or EDA.
+    ``auto`` (default): ``full`` when a tracker is found, ``lite`` otherwise.
+
+    The orchestrator resolves this once per capture and passes the answer to its
+    children through PLAYSMART_TIER_RESOLVED, so every recorder and the meta agree.
+    """
+    resolved = os.environ.get(ENV_TIER_RESOLVED)
+    if resolved in ("full", "lite"):
+        return resolved
+    want = tier_wanted()
+    if want != "auto":
+        return want
+    return "full" if tracker_present() else "lite"
+
+
+def skip_set(tier: str | None = None) -> set:
+    """Streams to neither start nor expect: PLAYSMART_SKIP plus the lite tier's set."""
+    skips = {p.strip().lower() for p in os.environ.get(ENV_SKIP, "").split(",") if p.strip()}
+    if (tier or resolve_tier()) == "lite":
+        skips |= LITE_SKIPS
+    skips |= {SKIP_ALIASES[s] for s in list(skips) if s in SKIP_ALIASES}
+    return skips
+
+
+def status_path() -> Path:
+    return data_dir() / "rig_status.json"
+
+
+def write_status(**fields) -> None:
+    """Merge fields into ``<data>/rig_status.json`` (best effort; the desktop app reads it).
+
+    Added 2026-10-28. Keys used: state (starting|armed|recording|finishing|idle|stopped),
+    tier, session_id, tracker, obs, updated_ms, pid, last_error.
+    """
+    import json
+    import time
+    p = status_path()
+    try:
+        cur = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except (OSError, ValueError):
+        cur = {}
+    cur.update(fields, updated_ms=int(time.time() * 1000), pid=os.getpid(), python=sys.executable)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cur), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
 
 
 def stream_dir(stream: str) -> Path:

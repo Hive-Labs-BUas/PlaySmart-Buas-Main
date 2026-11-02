@@ -14,7 +14,9 @@ Checks, in the order they matter:
 * **Coverage.** Every stream should span the whole game, not the first two minutes.
 * **Gaze validity.** The share of samples where the tracker actually had the eyes.
   Anything below ~85% means calibration or seating, not software.
-* **Emotion.** If it is ~95% Neutral the classifier is contributing nothing.
+* **Face.** OpenFace tracked a face on most frames, at a usable rate, and its blink
+  signal (AU45) agrees with the eyelid aperture derived from the eye landmarks.
+  (Legacy *emotion* files: if ~95% Neutral the classifier contributed nothing.)
 * **Input.** APM in a plausible range confirms the stream is real.
 """
 
@@ -259,7 +261,7 @@ def report(sid: str, data_dir: Path) -> bool:
             print(f"\n{WARN} audio has no timing anchor (<sid>_audio.json) - older recorder")
 
     # --- player-side streams ----------------------------------------------
-    for stream in ("gaze", "input", "emotion", "eda"):
+    for stream in ("gaze", "input", "face", "emotion", "eda"):
         path = data_dir / stream / f"{sid}_{stream}.csv"
         if not path.exists():
             print(f"\n{WARN} {stream}: no file for this session")
@@ -308,6 +310,39 @@ def report(sid: str, data_dir: Path) -> bool:
                 print(f"      {shown:6.1%} on screen, {mini:5.1%} of those in the minimap corner")
                 if on.sum() and not 0.03 < mini < 0.30:
                     print(f"{WARN} minimap share is outside the plausible 3-30% band")
+
+        if stream == "face":
+            if "success" in frame:
+                succ = pd.to_numeric(frame.success, errors="coerce").fillna(0).eq(1).mean()
+                flag = OK if succ > 0.9 else (WARN if succ > 0.6 else BAD)
+                good &= flag is not BAD
+                conf = pd.to_numeric(frame.get("confidence"), errors="coerce").median() if "confidence" in frame else float("nan")
+                print(f"{flag} face tracked on {succ:6.1%} of frames (median confidence {conf:.2f})")
+            flag = OK if rate >= 15 else (WARN if rate >= 8 else BAD)
+            print(f"{flag} {rate:.1f} frames/s from the webcam"
+                  + ("" if rate >= 15 else "  (OpenFace starved of CPU? lower PLAYSMART_FACE_CAM)"))
+            aus = [c for c in frame.columns if c.startswith("AU") and c.endswith("_r")]
+            print(f"      {len(aus)} AU intensities, "
+                  f"{sum(1 for c in frame.columns if c.startswith('pose_'))} pose, "
+                  f"{sum(1 for c in frame.columns if c.startswith('gaze_'))} webcam-gaze columns")
+            if "AU45_c" in frame:
+                blink = pd.to_numeric(frame.AU45_c, errors="coerce").fillna(0)
+                onsets = int(((blink == 1) & (blink.shift(fill_value=0) == 0)).sum())
+                per_min = onsets / max(span_min, 1e-9)
+                flag = OK if 3 <= per_min <= 40 else WARN
+                print(f"{flag} {per_min:.1f} blink onsets/min from AU45")
+                if "eye_aperture_0" in frame:
+                    ap = pd.to_numeric(frame[["eye_aperture_0", "eye_aperture_1"]].mean(axis=1), errors="coerce")
+                    ok_rows = ap.notna() & (blink.notna())
+                    if ok_rows.sum() > 100 and blink[ok_rows].nunique() > 1:
+                        corr = ap[ok_rows].corr(blink[ok_rows])
+                        flag = OK if corr < -0.2 else WARN
+                        print(f"{flag} eyelid aperture vs AU45 blink: r = {corr:+.2f}"
+                              + ("" if corr < -0.2 else "  (expected negative; check the eye-landmark index layout)"))
+            if "pose_Rx" in frame:
+                rx = pd.to_numeric(frame.pose_Rx, errors="coerce")
+                ry = pd.to_numeric(frame.pose_Ry, errors="coerce")
+                print(f"      head pitch sd {rx.std():.2f} rad, yaw sd {ry.std():.2f} rad")
 
         if stream == "emotion" and "emotion" in frame:
             counts = frame.emotion.value_counts(dropna=False)
