@@ -61,8 +61,21 @@ unzip it so that `OpenFace_2.2.0_win_x64\FeatureExtraction.exe` sits in the repo
 **run `download_models.ps1` inside that folder** — the zip does not include the CEN
 patch-expert models and `FeatureExtraction.exe` exits immediately without them.
 
+OpenFace produces the **`face` stream** (since 2 Nov 2026; it was called `emotion`):
+`data\face\<sid>_face.csv` with the 17 action-unit intensities and 18 presences, head pose,
+webcam gaze and a per-eye eyelid aperture, plus `<sid>_face.json` with the achieved fps and
+the clock anchor. No emotion label is computed and no face image, video or face landmark is
+ever written; OpenFace's scratch folder `output\<sid>\` is deleted when the session ends.
+
+It is **off on the lab PCs** (`PLAYSMART_SKIP=eda,emotion` in `.env`; `emotion` and `face`
+both work as the name) until the consent form and the DPO decision cover face measurements
+of participants. To record it: remove `emotion` from `PLAYSMART_SKIP`. Knobs in `.env`:
+`PLAYSMART_FACE_CAM=640x480` (webcam size; `1280x720` gives better AUs but costs CPU next
+to League — `check_session.py` warns below 15 fps), `PLAYSMART_FACE_DEVICE=0`,
+`PLAYSMART_FACE_KEEP_LANDMARKS=1` (also keep the 56 eye-region landmarks).
+
 If a PC has no webcam or no OpenFace, set `PLAYSMART_OPENFACE=0` in `.env`: the overlay
-then runs gaze-only and there is no emotion stream.
+then runs gaze-only and there is no face stream.
 
 ## Secrets: `.env`
 
@@ -112,7 +125,7 @@ project/
 ├── .env                       # passwords and switches (gitignored; see .env.example)
 ├── .venv/                     # Poetry environment on Python 3.10
 ├── data/                      # every recording; gitignored, never committed
-│   ├── audio  eda  emotion  gamestate  gaze  input  video
+│   ├── audio  eda  face  gamestate  gaze  input  video
 │   └── json/ign_mapping.json  # Riot ID -> participant id; stays on this PC
 ├── obs settings/
 │   ├── PlaySmart_League.json  # scene collection to import
@@ -125,7 +138,7 @@ project/
 │   ├── liveclient_recorder.py # League game state (Live Client Data API)
 │   ├── obs_recorder.py        # video via obs-websocket, timing anchor
 │   ├── eye_tracking_script.py # gaze (Tobii)
-│   ├── Emotion_gaze_visualization.py  # overlay + OpenFace emotion
+│   ├── Emotion_gaze_visualization.py  # overlay + OpenFace face stream (AUs, pose)
 │   ├── keyboard_recording.py  # input
 │   ├── microphone_recording.py# audio
 │   ├── nuanic_eda.py          # EDA ring
