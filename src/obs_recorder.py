@@ -77,6 +77,11 @@ PASSWORD = os.environ.get("PLAYSMART_OBS_PASSWORD", "")
 OFFSET_SAMPLES = 5
 OFFSET_TIMEOUT_S = 6.0
 STOP_SETTLE_S = 2.0
+# After StopRecord the muxer can hold the file open for several seconds (MP4
+# finalisation, a slow disk). Moving it while OBS still has the handle raised
+# WinError 32 on 27 Oct 2026 and left the video under OBS's name. Wait for the
+# handle to be released and the size to stop changing before claiming the file.
+RELEASE_TIMEOUT_S = 30.0
 
 
 def _client():
@@ -173,6 +178,46 @@ def _stats(client) -> dict:
     return out
 
 
+def _wait_released(path: Path, timeout: float = RELEASE_TIMEOUT_S) -> bool:
+    """True once nothing else holds ``path`` open and its size has settled.
+
+    On Windows an open-for-append fails with a sharing violation while OBS still
+    writes the file; on other platforms the size check alone has to do.
+    """
+    deadline = time.time() + timeout
+    last_size, stable_since = -1, time.time()
+    while time.time() < deadline:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = -1
+        if size != last_size:
+            last_size, stable_since = size, time.time()
+        released = False
+        try:
+            with open(path, "ab"):
+                released = True
+        except OSError:
+            released = False
+        if released and size > 0 and time.time() - stable_since >= 1.0:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _move_with_retry(source: Path, target: Path, attempts: int = 5) -> bool:
+    for i in range(attempts):
+        try:
+            shutil.move(str(source), str(target))
+            return True
+        except OSError as exc:
+            if i == attempts - 1:
+                print(f"  !! could not move the video into place ({exc}); left at {source}")
+                return False
+            time.sleep(1.0 + i)
+    return False
+
+
 def start(sid: str) -> dict | None:
     """Start an OBS recording for this session.
 
@@ -246,10 +291,9 @@ def stop(sid: str, handle: dict | None) -> Path | None:
 
     target = session.stream_path("video", ext=source.suffix.lstrip("."), sid=sid)
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        shutil.move(str(source), str(target))
-    except OSError as exc:
-        print(f"  !! could not move the video into place ({exc}); left at {source}")
+    if not _wait_released(source):
+        print(f"  !! OBS still holds {source.name} after {RELEASE_TIMEOUT_S:.0f}s - trying anyway")
+    if not _move_with_retry(source, target):
         target = source
 
     meta = {

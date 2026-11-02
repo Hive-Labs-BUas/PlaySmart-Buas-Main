@@ -4,6 +4,9 @@ rem check first, then the orchestrator. Passwords and switches come from .env
 rem (see .env.example); nothing needs to be typed into this window.
 cd /d "%~dp0"
 
+echo == PlaySmart capture: rig setup ==
+poetry run python src\rig_setup.py --quiet
+echo.
 echo == PlaySmart capture: pre-flight ==
 poetry run python src\preflight.py --no-ble
 if errorlevel 1 (

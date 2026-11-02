@@ -40,6 +40,31 @@ DEFAULT_DIRS = [
 ]
 
 
+def riot_install_dir() -> Path | None:
+    """Where the Riot client installed League, from Riot's own product metadata.
+
+    ``C:\\ProgramData\\Riot Games\\Metadata\\league_of_legends.live\\*.product_settings.yaml``
+    carries ``product_install_full_path``. Works for any install location without the
+    user typing a path (added 2026-10-27 for the packaged rig).
+    """
+    base = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "Riot Games" / "Metadata"
+    try:
+        candidates = sorted(base.glob("league_of_legends.*/*.product_settings.yaml"))
+    except OSError:
+        return None
+    for yaml_file in candidates:
+        try:
+            for line in yaml_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip().startswith("product_install_full_path:"):
+                    value = line.split(":", 1)[1].strip().strip('"').strip("'")
+                    p = Path(value)
+                    if p.is_dir():
+                        return p
+        except OSError:
+            continue
+    return None
+
+
 def _lockfile_from_process() -> Path | None:
     """Find the lockfile next to a running LeagueClient.exe (non-default installs)."""
     try:
@@ -62,6 +87,9 @@ def _lockfile_from_process() -> Path | None:
 def lockfile() -> Path | None:
     """Path of the client's lockfile, or None when the client is not running."""
     dirs = [Path(os.environ[ENV_LEAGUE_DIR])] if os.environ.get(ENV_LEAGUE_DIR) else []
+    riot = riot_install_dir()
+    if riot:
+        dirs.append(riot)
     for d in dirs + DEFAULT_DIRS:
         if (d / "lockfile").is_file():
             return d / "lockfile"

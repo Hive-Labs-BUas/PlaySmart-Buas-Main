@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 import threading
 import time
@@ -386,8 +387,11 @@ def meta_dict(sid: str, data: dict, started_ms: int) -> dict:
 # Minimap side as a fraction of screen width, per League MinimapScale. Measured on the
 # 28 Sep 2026 screen recordings of five rigs (scales 0.3, 0.9, 1.0, 1.32, 1.5 gave
 # 0.113, 0.138, 0.145, 0.156, 0.163 of the width); linear within 0.003 of each.
-MINIMAP_SIDE_A, MINIMAP_SIDE_B = 0.100, 0.042
-MINIMAP_MARGIN = 0.0016  # of screen width, between the map and the screen edge
+# The HUD scales with screen HEIGHT, not width (an ultrawide has the same minimap as a
+# 16:9 screen of the same height). Measured 2026-10-28 on a 2560x1440 recording at
+# MinimapScale 0.9: map square 300 px, 31 px from the right edge. Linear in the scale.
+MINIMAP_SIDE_PER_H = 0.2083 / 0.9   # side = height * this * scale
+MINIMAP_MARGIN_PER_H = 0.0215       # of screen height, between the map and the screen edge
 
 
 def estimate_minimap_rect(minimap_scale, width: int, height: int) -> "dict | None":
@@ -402,8 +406,8 @@ def estimate_minimap_rect(minimap_scale, width: int, height: int) -> "dict | Non
         return None
     if not (0.1 <= scale <= 2.5) or width <= 0 or height <= 0:
         return None
-    side = (MINIMAP_SIDE_A + MINIMAP_SIDE_B * scale) * width
-    margin = MINIMAP_MARGIN * width
+    side = MINIMAP_SIDE_PER_H * scale * height
+    margin = MINIMAP_MARGIN_PER_H * height
     x1, y1 = width - margin, height - margin
     return {"x0": round(x1 - side), "y0": round(y1 - side), "x1": round(x1), "y1": round(y1),
             "screen_px": [width, height], "minimap_scale": scale,
@@ -462,6 +466,12 @@ def add_identity(meta: dict, meta_file: Path) -> None:
     except Exception as exc:  # never let this reach the recording thread
         ident = {"identity_source": f"error: {exc}"}
     meta.update(ident)
+    # Which tier recorded this session (full = eye tracker, lite = no biometrics) and
+    # which streams were deliberately not started. Added 2026-10-27 so the analysis
+    # can tell "no gaze file" (lite rig) from "gaze recorder died" (full rig).
+    meta["capture_tier"] = os.environ.get(playsmart_session.ENV_TIER_RESOLVED, "")
+    meta["streams_skipped"] = sorted(
+        p.strip() for p in os.environ.get(playsmart_session.ENV_SKIP, "").split(",") if p.strip())
     # Session context from the client (added 25 Sep 2026): the game and input
     # settings (where the minimap is, which key is a ping), the queue (solo queue /
     # custom / ranked) and the account's tier. Each part is best-effort.
