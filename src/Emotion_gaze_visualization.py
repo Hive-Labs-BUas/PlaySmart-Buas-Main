@@ -93,10 +93,13 @@ command = [
     '-aus'
 ]
  
+# stderr goes into stdout, and the monitor thread keeps reading stdout until OpenFace exits.
+# Before, both were pipes that nobody read after "Starting tracking": once a pipe buffer is full,
+# OpenFace blocks on its next write and stops producing frames (emotion files ending early).
 process = subprocess.Popen(
     command,
     stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
     text=True
 )
  
@@ -106,16 +109,20 @@ def monitor_openface():
  
     global start_unix_time
  
+    started = False
+ 
     try:
         for line in process.stdout:
  
-            if "Starting tracking" in line:
+            if not started and "Starting tracking" in line:
  
                 start_unix_time = int(time.time() * 1000)
  
                 print(f"Tracking started at: {start_unix_time}")
  
-                break
+                started = True
+ 
+            # keep reading (and discarding) so the pipe never fills up
  
     except Exception as e:
         print(f"Monitor thread error: {e}")
@@ -249,7 +256,12 @@ def save_emotion_data():
             f'emotion_data_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.csv'
         )
  
-        df.to_csv(save_file_path, index=False)
+        # Write under a temporary name first, so a half-written file is never picked up as .csv
+        tmp_path = save_file_path + '.tmp'
+ 
+        df.to_csv(tmp_path, index=False)
+ 
+        os.replace(tmp_path, save_file_path)
  
         print(f"Saved emotion data to {save_file_path}")
  
@@ -259,6 +271,10 @@ def save_emotion_data():
 # ---------------- Stop Recording ----------------
  
 def stop_recording():
+    """Only sets the flag. The main thread stops OpenFace and saves (see the finally block), so the
+    save runs to completion before this process exits, and key_listener.py waits for that exit
+    before it opens the pop-up. Before, the save ran in the hotkey thread while the main thread
+    deleted OpenFace's output and exited."""
  
     global is_stopping
  
@@ -268,10 +284,6 @@ def stop_recording():
     is_stopping = True
  
     print("Stopping recording...")
- 
-    save_emotion_data()
- 
-    print("Recording stopped.")
  
 # ---------------- Hotkey Listener ----------------
  
@@ -419,6 +431,12 @@ finally:
     pygame.quit()
  
     time.sleep(1)
+ 
+    # Save after OpenFace has stopped (its CSV is complete and closed) and before the cleanup
+    # below deletes it.
+    save_emotion_data()
+ 
+    print("Recording stopped.")
  
     # Cleanup output directory
     if os.path.exists(output_dir):

@@ -1,5 +1,6 @@
  
 import os
+import csv
 import glob
 import datetime
 import tkinter as tk
@@ -16,6 +17,13 @@ from server.python_app.sftp_upload import upload_file_to_sftp
 # ------------------ PC CONFIG ------------------
  
 PC_NAME = "pc02"
+ 
+# ------------------ Session matching ------------------
+# key_listener.py writes the F7 time here. Only files created after it belong to this recording,
+# so a late or missing file can no longer cause an earlier recording's file to get this name.
+SESSION_FILE = "data/session_start.json"
+CREATED_TOLERANCE_S = 5   # a file counts as this recording's if created at most this long before F7
+START_WARN_S = 120        # warn if a file's first unix_time is further than this from F7
  
 # ------------------ Utility Functions ------------------
  
@@ -164,7 +172,99 @@ def get_ordinal(n):
     return f"{n}{'th' if 4 <= n % 100 <= 20 else {1:'st',2:'nd',3:'rd'}.get(n%10,'th')}"
  
  
+# ------------------ Session file matching ------------------
+ 
+def load_session_start():
+    try:
+        with open(SESSION_FILE, 'r') as f:
+            return int(json.load(f)["start_ms"])
+    except Exception:
+        return None
+ 
+ 
+def created_time(path):
+    st = os.stat(path)
+    return getattr(st, "st_birthtime", st.st_ctime)  # creation time on Windows
+ 
+ 
+def first_unix_time_ms(path):
+    """First numeric unix_time in a CSV, in ms (seconds are converted). None if there is none."""
+    try:
+        with open(path, newline='') as f:
+            reader = csv.reader(f)
+            header = [h.strip() for h in next(reader)]
+            if "unix_time" not in header:
+                return None
+            i = header.index("unix_time")
+            for row in reader:
+                try:
+                    t = float(row[i])
+                except (ValueError, IndexError):
+                    continue
+                return t * 1000 if t < 1e11 else t
+    except Exception:
+        return None
+    return None
+ 
+ 
+def find_session_file(folder, start_ms, tag):
+    """The unnamed CSV in `folder` that was written during this recording, or None."""
+    files = [
+        p for p in glob.glob(os.path.join(folder, "*.csv"))
+        if "_game_" not in os.path.basename(p)
+    ]
+ 
+    if start_ms is None:
+        print(f"WARNING: no session start found ({SESSION_FILE}); "
+              f"using the newest {tag} file (old behaviour)")
+        return max(files, key=os.path.getmtime) if files else None
+ 
+    fresh = [p for p in files if created_time(p) >= start_ms / 1000 - CREATED_TOLERANCE_S]
+ 
+    stale = len(files) - len(fresh)
+    if stale:
+        print(f"WARNING: {stale} unnamed {tag} file(s) from before this recording in {folder}; "
+              f"left as they are, not renamed or uploaded")
+ 
+    if not fresh:
+        print(f"WARNING: no {tag} file was written during this recording; "
+              f"nothing renamed or uploaded for {tag}")
+        return None
+ 
+    if len(fresh) > 1:
+        print(f"WARNING: {len(fresh)} {tag} files written during this recording; using the newest")
+ 
+    path = max(fresh, key=os.path.getmtime)
+ 
+    t0 = first_unix_time_ms(path)
+    if t0 is not None and abs(t0 - start_ms) > START_WARN_S * 1000:
+        print(f"WARNING: {tag} file starts {(t0 - start_ms) / 1000:+.0f} s from F7; check it")
+ 
+    return path
+ 
+ 
 # ------------------ Upload Function ------------------
+ 
+def upload_with_retry(path, dest_directory):
+ 
+    for i in range(3):
+ 
+        try:
+ 
+            print(f"Uploading: {path}")
+ 
+            upload_file_to_sftp(path, dest_directory)
+ 
+            print(f"Uploaded: {os.path.basename(path)}")
+ 
+            return
+ 
+        except Exception as e:
+ 
+            print(f"Retry {i+1} failed: {e}")
+ 
+            time.sleep(2)
+ 
  
 def upload_newest_file(folder_path, dest_directory, extension=None):
  
@@ -288,11 +388,13 @@ def main():
  
     base_name = f"{ordinal}_game_{player_id}_{game_name}_{today}_{now}"
  
-    def is_already_processed(filepath):
- 
-        return "_game_" in os.path.basename(filepath)
- 
     # ---------------- CSV RENAME ----------------
+    # Only files written during this recording (created after F7) are renamed, and exactly those
+    # files are uploaded below.
+ 
+    start_ms = load_session_start()
+ 
+    renamed = {}
  
     for folder, tag in {
         "data/input": "input",
@@ -301,9 +403,9 @@ def main():
         "data/eda": "eda",
     }.items():
  
-        latest = get_latest_file(folder)
+        latest = find_session_file(folder, start_ms, tag)
  
-        if latest and not is_already_processed(latest):
+        if latest:
  
             new_path = os.path.join(
                 folder,
@@ -314,13 +416,20 @@ def main():
  
                 os.replace(latest, new_path)
  
-                print(f"Renamed {tag}")
+                renamed[tag] = new_path
  
-                time.sleep(1)
+                print(f"Renamed {tag}")
  
             except Exception as e:
  
                 print(f"Rename failed for {tag}: {e}")
+ 
+    # A stale start time must not be reused by a later manual run.
+    if start_ms is not None:
+        try:
+            os.remove(SESSION_FILE)
+        except OSError:
+            pass
  
     # ---------------- AUDIO ----------------
  
@@ -392,30 +501,11 @@ def main():
  
     time.sleep(3)
  
-    # CSV uploads
-    upload_newest_file(
-        'data/emotion',
-        "/data/emotion/",
-        ".csv"
-    )
+    # CSV uploads: exactly the files renamed above (not "the newest file in the folder")
+    for tag in ("emotion", "input", "gaze", "eda"):
  
-    upload_newest_file(
-        'data/input',
-        "/data/input/",
-        ".csv"
-    )
- 
-    upload_newest_file(
-        'data/gaze',
-        "/data/gaze/",
-        ".csv"
-    )
- 
-    upload_newest_file(
-        'data/eda',
-        "/data/eda/",
-        ".csv"
-    )
+        if tag in renamed:
+            upload_with_retry(renamed[tag], f"/data/{tag}/")
  
     # PNG uploads
     upload_newest_file(
