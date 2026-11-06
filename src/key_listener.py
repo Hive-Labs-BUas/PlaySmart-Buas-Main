@@ -480,11 +480,13 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
         report_meta(sid)
 
     session.write_status(state="finishing", session_id=sid)
-    if not dry_run and os.environ.get("PLAYSMART_POPUP", "1") != "0":   # the desktop app asks in its own UI
-        print("Labelling and uploading…")
+    if not dry_run:
+        # Post-game stats, manifest, sessions.csv and the upload. PLAYSMART_POPUP=0 only
+        # drops the self-label dialog inside pop_up_screen (the desktop app asks in its UI).
+        print("Post-game: stats, manifest, index, upload…")
         result = subprocess.run([sys.executable, str(SRC / "pop_up_screen.py")],
                                 cwd=str(REPO), env=child_env(sid))
-        print("Upload step finished." if result.returncode == 0 else "Upload step failed.")
+        print("Post-game step finished." if result.returncode == 0 else "Post-game step failed.")
 
     print(f"=== SESSION {sid} complete ===\n")
     session.write_status(state="idle", last_session_id=sid, session_id="")

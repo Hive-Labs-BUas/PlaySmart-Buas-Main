@@ -136,6 +136,51 @@ def _locate_frame_zero(client) -> float | None:
     return statistics.median(samples)
 
 
+AUDIO_INPUT_KINDS = ("wasapi_process_output_capture", "wasapi_output_capture", "wasapi_input_capture",
+                     "coreaudio_output_capture", "coreaudio_input_capture", "pulse_output_capture",
+                     "pulse_input_capture")
+
+
+def audio_layout(client) -> dict:
+    """Which audio input ends up on which recording track (added 2026-11-05).
+
+    Returns ``{"tracks": {"1": ["League Game Audio"], "2": ["Mic/Aux"]}, "muted": [...],
+    "rec_tracks": <bitmask from the profile or None>, "mixed": [tracks with >1 input]}``.
+    Only unmuted inputs count. Best effort: a query that fails leaves its part out.
+    """
+    out: dict = {"tracks": {}, "muted": [], "rec_tracks": None, "mixed": []}
+    for kind in AUDIO_INPUT_KINDS:
+        try:
+            inputs = getattr(client.get_input_list(kind), "inputs", None) or []
+        except Exception:
+            continue
+        for i in inputs:
+            name = i.get("inputName")
+            if not name:
+                continue
+            try:
+                if getattr(client.get_input_mute(name), "input_muted", False):
+                    out["muted"].append(name)
+                    continue
+                tracks = getattr(client.get_input_audio_tracks(name), "input_audio_tracks", {}) or {}
+            except Exception:
+                continue
+            for t, on in sorted(tracks.items()):
+                if on:
+                    out["tracks"].setdefault(str(t), []).append(name)
+    for cat in ("SimpleOutput", "AdvOut"):
+        try:
+            v = getattr(client.get_profile_parameter(cat, "RecTracks"), "parameter_value", None)
+            if v not in (None, ""):
+                out["rec_tracks"] = int(v)
+                out["rec_tracks_source"] = cat
+                break
+        except Exception:
+            pass
+    out["mixed"] = [t for t, names in out["tracks"].items() if len(names) > 1]
+    return out
+
+
 def _stats(client) -> dict:
     """OBS's own account of the recording: dropped frames and the video geometry.
 
@@ -175,6 +220,10 @@ def _stats(client) -> dict:
                 out[name] = v
     except Exception as exc:
         out["video_settings_error"] = str(exc)
+    try:
+        out["audio_tracks"] = audio_layout(client)
+    except Exception as exc:
+        out["audio_tracks_error"] = str(exc)
     return out
 
 

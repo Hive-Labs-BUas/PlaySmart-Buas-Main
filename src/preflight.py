@@ -407,6 +407,24 @@ def check_obs() -> None:
             report(OK, "obs recording dir", rec_dir)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            import obs_recorder
+            lay = obs_recorder.audio_layout(c)
+            desc = ", ".join(f"track {t}: {' + '.join(n)}" for t, n in sorted(lay["tracks"].items()))
+            rec = lay.get("rec_tracks")
+            not_recorded = [t for t in lay["tracks"] if rec is not None and not (rec >> (int(t) - 1)) & 1]
+            if lay["mixed"]:
+                report(FAIL, "obs audio", f"{desc}  - inputs share track {', '.join(lay['mixed'])}: "
+                       "game sound and microphone must be on different tracks (python src\\rig_setup.py fixes it)")
+            elif not lay["tracks"]:
+                report(WARN, "obs audio", "no unmuted audio input - the recording will be silent")
+            elif not_recorded:
+                report(FAIL, "obs audio", f"{desc}  - track {', '.join(not_recorded)} is not in the recording "
+                       f"(RecTracks={rec}); OBS Settings > Output > Recording > Audio Track, or rig_setup.py")
+            else:
+                report(OK, "obs audio", desc + (f"  (RecTracks={rec})" if rec is not None else ""))
+        except Exception as exc:  # noqa: BLE001
+            report(WARN, "obs audio", f"could not read the track layout ({exc})")
     except Exception as exc:  # noqa: BLE001
         report(WARN, "obs", f"connected but query failed ({exc})")
 

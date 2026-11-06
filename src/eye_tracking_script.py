@@ -18,10 +18,15 @@ so every invalid sample silently vanished and every written row said valid. The
 Also warns on-screen when the player sits outside 50-75 cm from the tracker.
 
 Modified 2026-11-02:
-* `unix_time` is now the Tobii's own `system_time_stamp` converted to wall time with a
-  clock offset measured at start (and re-measured at the end, both in the json). The
+* `unix_time` is now the Tobii's own `system_time_stamp` converted to wall time. The
   callback's arrival time jittered by ~25 ms SD against the tracker clock on the 26 Oct
   session; it is kept as `callback_unix_time` for comparison.
+
+Modified 2026-11-06: the wall-vs-tracker offset is not a constant. On the 5 Nov Xayah
+session it moved 88 ms in 32 minutes (Windows nudging the wall clock; the Tobii clock is
+monotonic). The offset is now re-measured every 5 s while recording and each sample is
+converted with the offset interpolated at its own time, so `unix_time` tracks the wall
+clock to a few ms over any length of game. The samples are in `clock_offsets` in the json.
 * Per-eye 3D gaze point and gaze origin in the user coordinate system (mm) are kept, not
   just their average: visual angle and angular velocity (I-VT fixation filtering) need
   them. Per-eye pupil validity is kept too.
@@ -178,11 +183,36 @@ if clock_offset_us is None:
 else:
     print(f"Tracker clock offset: {clock_offset_us / 1e6:.3f} s (wall - tracker)")
 
+# (tracker system time us, wall - tracker offset us), appended every OFFSET_EVERY_S by
+# the main loop. Samples are converted at the end with the offset interpolated at their
+# own tracker time, so a drifting wall clock is followed instead of assumed constant.
+OFFSET_EVERY_S = 5.0
+clock_offsets = []
+if clock_offset_us is not None:
+    clock_offsets.append((float(tr.get_system_time_stamp()), float(clock_offset_us)))
 
-def to_unix_ms(system_ts, fallback_ms: int) -> int:
-    if clock_offset_us is None or not _finite(system_ts):
-        return fallback_ms
-    return int(round((float(system_ts) + clock_offset_us) / 1000.0))
+
+def sample_clock_offset() -> None:
+    off = measure_clock_offset_us(n=9)
+    if off is not None:
+        clock_offsets.append((float(tr.get_system_time_stamp()), float(off)))
+
+
+def to_unix_ms_series(system_ts, fallback_ms):
+    """Vectorised conversion of tracker timestamps to wall ms via the sampled offsets."""
+    import numpy as np
+    ts = pd.to_numeric(pd.Series(system_ts), errors="coerce").to_numpy(dtype=float)
+    out = pd.Series(fallback_ms, dtype="float64").to_numpy(dtype=float).copy()
+    if not clock_offsets:
+        return pd.Series(out).round().astype("int64")
+    xs = np.array([a for a, _ in clock_offsets])
+    ys = np.array([b for _, b in clock_offsets])
+    order = np.argsort(xs)
+    xs, ys = xs[order], ys[order]
+    ok = np.isfinite(ts)
+    off = np.interp(ts[ok], xs, ys)          # flat beyond the first/last sample
+    out[ok] = (ts[ok] + off) / 1000.0
+    return pd.Series(out).round().astype("int64")
 
 
 # ---------------------------
@@ -294,8 +324,7 @@ def gaze_data_callback(gaze_data):
         device_ts = gaze_data.get('device_time_stamp')
         system_ts = gaze_data.get('system_time_stamp')
 
-    callback_unix_time = unix_time
-    unix_time = to_unix_ms(system_ts, callback_unix_time)
+    callback_unix_time = unix_time   # converted from system_ts at save time (see to_unix_ms_series)
 
     # Head position: the mean of the two eye origins, in the tracker's user
     # coordinate system (mm; z is the distance from the screen plane). Free with
@@ -502,9 +531,13 @@ try:
     # session.stop_requested() covers both the orchestrator's stop signal and a
     # manual F12. With automatic start/stop there is no key press to wait for,
     # and this loop exiting normally is what reaches the to_csv() in `finally`.
+    _next_offset = time.time() + OFFSET_EVERY_S
     while not session.stop_requested():
         if use_mock_data:
             gaze_data_callback({})
+        if clock_offset_us is not None and time.time() >= _next_offset:
+            sample_clock_offset()
+            _next_offset = time.time() + OFFSET_EVERY_S
         time.sleep(1/60)
 
 # ---------------------------
@@ -512,6 +545,8 @@ try:
 # ---------------------------
 finally:
     clock_offset_end_us = measure_clock_offset_us() if my_eyetracker is not None else None
+    if clock_offset_end_us is not None:
+        clock_offsets.append((float(tr.get_system_time_stamp()), float(clock_offset_end_us)))
     if my_eyetracker is not None:
         my_eyetracker.unsubscribe_from(tr.EYETRACKER_GAZE_DATA, gaze_data_callback)
         if openness_supported:
@@ -536,6 +571,8 @@ finally:
         # Save CSV
         csv_path = str(session.stream_path("gaze"))
         df = pd.DataFrame(gaze_data_list)
+        if clock_offset_us is not None:
+            df["unix_time"] = to_unix_ms_series(df["system_time_stamp"], df["callback_unix_time"])
         if openness_samples == 0:
             # No device-side openness: do not ship two empty columns per sample.
             df = df.drop(columns=[c for c in ("left_openness", "right_openness") if c in df])
@@ -561,6 +598,8 @@ finally:
                 "clock_offset_end_us": clock_offset_end_us,
                 "clock_drift_ms": (round((clock_offset_end_us - clock_offset_us) / 1000.0, 2)
                                    if clock_offset_us is not None and clock_offset_end_us is not None else None),
+                "clock_offset_samples": len(clock_offsets),
+                "clock_offsets": [[round(a), round(b)] for a, b in clock_offsets],
                 "callback_jitter_ms_sd": (round(float((df["unix_time"] - df["callback_unix_time"]).std()), 2)
                                           if clock_offset_us is not None else None),
                 "notifications": notifications,

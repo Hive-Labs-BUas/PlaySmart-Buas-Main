@@ -10,9 +10,10 @@ to do in OBS is done here, idempotently, from the screen this PC actually has:
 * **OBS started** if it is not running (``--no-launch`` to skip).
 * **Scene collection + scene** ``PlaySmart - League`` with one Game Capture of
   ``League of Legends.exe`` stretched to the canvas, and one Application Audio Capture
-  of the same process. The collection's default Desktop Audio and Mic/Aux are muted: the
-  recording carries the game's sound only, never Discord, music or the player's voice
-  (the microphone is the rig's own, separate, consented stream).
+  of the same process on **recording track 1**. Desktop Audio is muted (never Discord or
+  music). The microphone goes on **track 2** of the same recording, never mixed with the
+  game sound (2026-11-05; ``PLAYSMART_OBS_MIC_TRACK=0`` mutes it in OBS instead, leaving
+  the rig's own WAV as the only voice recording).
 * **Canvas = output = the primary screen** at 30 fps (``--fps 60``). Downscaled output
   makes the minimap unreadable; a canvas that is not the screen puts video on a
   different pixel grid from the input log.
@@ -325,10 +326,54 @@ def ensure_scene(client) -> None:
     ensure_audio(client)
 
 
+MIC_IN_VIDEO = os.environ.get("PLAYSMART_OBS_MIC_TRACK", "1") != "0"
+TRACK_GAME, TRACK_MIC = 1, 2
+
+
+def _tracks(n: int) -> dict:
+    return {str(i): (i == n) for i in range(1, 7)}
+
+
+def set_tracks(client, name: str, track: int) -> None:
+    """Put one input on exactly one recording track."""
+    try:
+        cur = _attr(client.get_input_audio_tracks(name), "input_audio_tracks", default={}) or {}
+    except Exception as exc:  # noqa: BLE001
+        say(f"could not read tracks of '{name}' ({exc})")
+        return
+    want = _tracks(track)
+    if {str(k): bool(v) for k, v in cur.items()} == want:
+        return
+    change(f"OBS input '{name}' -> recording track {track} only")
+    if not CHECK:
+        try:
+            client.set_input_audio_tracks(name, want)
+        except Exception as exc:  # noqa: BLE001
+            say(f"!! could not set tracks of '{name}' ({exc})")
+
+
+def set_mute(client, name: str, muted: bool, why: str) -> None:
+    try:
+        cur = _attr(client.get_input_mute(name), "input_muted", default=None)
+    except Exception as exc:  # noqa: BLE001
+        say(f"could not read mute of '{name}' ({exc})")
+        return
+    if cur is None or bool(cur) == muted:
+        return
+    change(f"{'mute' if muted else 'unmute'} OBS input '{name}' ({why})")
+    if not CHECK:
+        client.set_input_mute(name, muted)
+
+
 def ensure_audio(client) -> None:
-    """Game audio only: an Application Audio Capture of League (OBS 28+), and the
-    collection's global Desktop Audio / Mic/Aux muted so nothing else on the PC ends up in
-    the recording. Reversible in OBS (unmute) if a coach wants otherwise."""
+    """Game audio on track 1, the microphone on track 2, nothing else.
+
+    An Application Audio Capture of League (OBS 28+) is the only game-sound source;
+    the collection's global Desktop Audio is muted so Discord, music or system sounds
+    never end up in the recording. Mic/Aux is unmuted and sent to track 2 alone, so the
+    voice is frame-locked to the video but never mixed into the game sound; the rig's
+    own ``_audio.wav`` stays the primary voice stream. ``PLAYSMART_OBS_MIC_TRACK=0``
+    mutes the mic in OBS instead."""
     try:
         kinds = _attr(client.get_input_kind_list(False), "input_kinds", default=[]) or []
     except Exception as exc:  # noqa: BLE001
@@ -349,23 +394,34 @@ def ensure_audio(client) -> None:
                 client.set_input_settings(AUDIO_SOURCE, settings, True)
             except Exception as exc:  # noqa: BLE001
                 say(f"could not update '{AUDIO_SOURCE}' ({exc})")
+        set_tracks(client, AUDIO_SOURCE, TRACK_GAME)
     else:
         say("!! this OBS has no Application Audio Capture (needs OBS 28+); desktop audio stays")
         return
     # the global devices OBS adds to every new collection
-    for kind in ("wasapi_output_capture", "wasapi_input_capture"):
+    for kind, is_mic in (("wasapi_output_capture", False), ("wasapi_input_capture", True)):
         try:
             for i in _attr(client.get_input_list(kind), "inputs", default=[]) or []:
                 name = i.get("inputName")
                 if not name or name == AUDIO_SOURCE:
                     continue
-                muted = _attr(client.get_input_mute(name), "input_muted", default=False)
-                if not muted:
-                    change(f"mute OBS input '{name}' (only League's own audio is recorded)")
-                    client.set_input_mute(name, True)
+                if is_mic and MIC_IN_VIDEO:
+                    set_mute(client, name, False, "microphone on its own track")
+                    set_tracks(client, name, TRACK_MIC)
+                else:
+                    set_mute(client, name, True,
+                             "only League's own audio is recorded" if not is_mic
+                             else "PLAYSMART_OBS_MIC_TRACK=0: voice only in the rig's WAV")
+                    set_tracks(client, name, TRACK_GAME)
         except Exception as exc:  # noqa: BLE001
             say(f"could not check OBS audio input '{kind}' ({exc})")
-    say(f"obs audio: '{AUDIO_SOURCE}' only")
+    try:
+        import obs_recorder
+        lay = obs_recorder.audio_layout(client)
+        desc = ", ".join(f"track {t}: {' + '.join(n)}" for t, n in sorted(lay["tracks"].items())) or "no unmuted input"
+        say(f"obs audio: {desc}" + (f"  !! MIXED on track(s) {', '.join(lay['mixed'])}" if lay["mixed"] else ""))
+    except Exception:  # noqa: BLE001
+        say(f"obs audio: '{AUDIO_SOURCE}' on track {TRACK_GAME}" + (f", mic on track {TRACK_MIC}" if MIC_IN_VIDEO else ""))
 
 
 def ensure_video(client, fps: int) -> None:
@@ -395,6 +451,8 @@ def ensure_output(client, rec_dir: Path) -> None:
     wanted = [
         ("Output", "Mode", "Simple"),
         ("SimpleOutput", "RecFormat2", "mkv"),
+        # bitmask of recorded tracks: 1 = game, 3 = game + mic (track 2)
+        ("SimpleOutput", "RecTracks", "3" if MIC_IN_VIDEO else "1"),
         ("SimpleOutput", "RecQuality", "HQ"),
         ("SimpleOutput", "RecEncoder", encoder),
         ("SimpleOutput", "FilePath", str(rec_dir)),

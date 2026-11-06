@@ -306,10 +306,16 @@ def main():
             save_eog(sid, meta)
         except Exception as exc:
             print(f"Post-game stats skipped: {exc}")
-        try:
-            self_labels.collect(sid, meta)
-        except Exception as exc:
-            print(f"Self-labels skipped: {exc}")
+        # PLAYSMART_POPUP=0 (the desktop app) skips the Tk dialog only; the post-game
+        # stats, manifest, session index and upload below still run (2026-11-06: the
+        # app's sessions of 5 Nov had none of them because the whole script was skipped).
+        if os.environ.get("PLAYSMART_POPUP", "1") == "0":
+            print("Self-labels: skipped (PLAYSMART_POPUP=0, the app asks in its own UI)")
+        else:
+            try:
+                self_labels.collect(sid, meta)
+            except Exception as exc:
+                print(f"Self-labels skipped: {exc}")
 
     files = session_files(sid)
     if "video" not in files:

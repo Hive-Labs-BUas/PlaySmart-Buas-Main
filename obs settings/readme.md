@@ -47,6 +47,20 @@ Settings → Output → Recording:
 | Encoder | NVENC / hardware if present | x264 at 1080p60 competes with OpenFace for CPU |
 | Automatic File Splitting | off | `StopRecord` reports one file |
 | Settings → Advanced → *Automatically remux to mp4* | **off** | the remux would run on a file that has already been moved |
+| Audio Track | **1 and 2** ticked | track 1 = game sound, track 2 = microphone; see below |
+
+**Audio on separate tracks (added 2026-11-05).** Game sound and the player's voice are
+never mixed into one track: Edit → Advanced Audio Properties → *League Game Audio* →
+track **1** only; *Mic/Aux* → track **2** only, unmuted; *Desktop Audio* muted (Discord,
+music and system sounds stay out). `python src\rig_setup.py` sets all of this over the
+websocket and `preflight.py` prints the layout as `obs audio: track 1: League Game Audio,
+track 2: Mic/Aux` — a `FAIL` there means two inputs share a track. The rig's own
+`data\audio\<sid>_audio.wav` remains the primary voice recording (own timing anchor);
+track 2 is the frame-locked copy. `PLAYSMART_OBS_MIC_TRACK=0` in `.env` mutes the mic in
+OBS instead. The layout actually recorded is written into `<sid>_video.json`
+(`audio_tracks`). Split afterwards with
+`ffmpeg -i <sid>_video.mkv -map 0:a:0 game.wav -map 0:a:1 mic.wav`; check a file with
+`ffprobe <sid>_video.mkv` (two `Audio:` streams).
 
 Hotkeys for start/stop are no longer needed; F7 in the capture window is the only key.
 
