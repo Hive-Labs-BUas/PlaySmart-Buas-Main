@@ -349,11 +349,15 @@ def status_ticker(sid: str, obs_handle, tier: str, stop: threading.Event, every:
     cache: dict = {}
     data = session.data_dir()
     skips = session.skip_set(tier)
+    started_ms = time.time() * 1000
     while not stop.is_set():
         c = {
             "video_s": None, "input_events": None, "gamestate_rows": None, "audio_s": None, "gaze_rows": None,
-            "face_rows": None,
+            "face_rows": None, "gaze_valid_recent": None, "gaze_valid_total": None, "gaze_head_dist_mm": None,
+            "gaze_stale_s": None, "elapsed_s": None,
         }
+        if started_ms:
+            c["elapsed_s"] = max(0, int(time.time() - started_ms / 1000))
         if obs_handle and obs_handle.get("t0_unix_ms"):
             c["video_s"] = max(0, int(time.time() - obs_handle["t0_unix_ms"] / 1000))
         if "input" not in skips:
@@ -365,7 +369,17 @@ def status_ticker(sid: str, obs_handle, tier: str, stop: threading.Event, every:
             except OSError:
                 c["audio_s"] = 0
         if "gaze" not in skips:
-            c["gaze_rows"] = _rows_estimate(data / "gaze" / f"{sid}_gaze.csv", cache)
+            # the gaze recorder buffers and writes at the end; it publishes its progress instead
+            try:
+                import json as _json
+                prog = _json.loads((data / "gaze" / f"{sid}_gaze.progress.json").read_text(encoding="utf-8"))
+                c["gaze_rows"] = int(prog.get("samples") or 0)
+                c["gaze_valid_recent"] = prog.get("valid_share_recent")
+                c["gaze_valid_total"] = prog.get("valid_share_total")
+                c["gaze_head_dist_mm"] = prog.get("head_dist_mm")
+                c["gaze_stale_s"] = round(max(0.0, time.time() - (prog.get("updated_ms") or 0) / 1000.0), 1)
+            except (OSError, ValueError):
+                c["gaze_rows"] = _rows_estimate(data / "gaze" / f"{sid}_gaze.csv", cache)
         if "face" not in skips and os.environ.get("PLAYSMART_OPENFACE", "1") == "1":
             # OpenFace writes to output/<sid>/ until the session ends; count rows there.
             c["face_rows"] = _rows_estimate(REPO / "output" / sid / f"{sid}_face.csv", cache)

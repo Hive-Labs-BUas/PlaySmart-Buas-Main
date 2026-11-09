@@ -523,6 +523,40 @@ def tracker_info():
     return info
 
 # ---------------------------
+# LIVE PROGRESS (added 2026-11-09)
+# ---------------------------
+# The samples are written once at the end, so the orchestrator's status ticker (and the
+# desktop app's "Gathering" panel) saw gaze_rows = 0 for the whole game. This small json
+# is rewritten every 2 s: how many samples so far, and the share with a tracker fix over
+# the last 10 s - the one number that says "the tracker lost the player" while it can
+# still be fixed (re-seat, glasses, calibration).
+PROGRESS_EVERY_S = 2.0
+_progress_path = session.stream_path("gaze", ext="progress.json")
+
+
+def write_progress() -> None:
+    n = len(gaze_data_list)
+    recent = gaze_data_list[-600:]
+    valid_recent = (sum(1 for r in recent if r["gaze_valid"]) / len(recent)) if recent else None
+    last_age_s = (time.time() * 1000 - gaze_data_list[-1]["callback_unix_time"]) / 1000.0 if n else None
+    info = {
+        "session_id": session.session_id(), "samples": n,
+        "valid_share_total": round(sum(1 for r in gaze_data_list if r["gaze_valid"]) / n, 3) if n else None,
+        "valid_share_recent": round(valid_recent, 3) if valid_recent is not None else None,
+        "head_dist_mm": gaze_data_list[-1]["head_dist_mm"] if n else None,
+        "head_distance_warnings": _head_warnings,
+        "last_sample_age_s": round(last_age_s, 1) if last_age_s is not None else None,
+        "updated_ms": int(time.time() * 1000),
+    }
+    try:
+        tmp = _progress_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(info), encoding="utf-8")
+        os.replace(tmp, _progress_path)
+    except OSError:
+        pass
+
+
+# ---------------------------
 # MAIN LOOP
 # ---------------------------
 print("Recording... stops when the game ends, or on F12.")
@@ -532,12 +566,16 @@ try:
     # manual F12. With automatic start/stop there is no key press to wait for,
     # and this loop exiting normally is what reaches the to_csv() in `finally`.
     _next_offset = time.time() + OFFSET_EVERY_S
+    _next_progress = time.time() + PROGRESS_EVERY_S
     while not session.stop_requested():
         if use_mock_data:
             gaze_data_callback({})
         if clock_offset_us is not None and time.time() >= _next_offset:
             sample_clock_offset()
             _next_offset = time.time() + OFFSET_EVERY_S
+        if time.time() >= _next_progress:
+            write_progress()
+            _next_progress = time.time() + PROGRESS_EVERY_S
         time.sleep(1/60)
 
 # ---------------------------
@@ -569,6 +607,10 @@ finally:
         print("No data recorded.")
     else:
         # Save CSV
+        try:
+            _progress_path.unlink()
+        except OSError:
+            pass
         csv_path = str(session.stream_path("gaze"))
         df = pd.DataFrame(gaze_data_list)
         if clock_offset_us is not None:
