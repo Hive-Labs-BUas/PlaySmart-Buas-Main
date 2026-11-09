@@ -1,13 +1,21 @@
+"""Nuanic EDA ring recorder (BLE) to data/eda/<session_id>_eda.csv.
+
+Modified 2026-09 (iteration 5): file named from the shared session id; stops on the
+orchestrator's stop signal so the buffered samples are written instead of lost.
+"""
 
 import asyncio
 import struct
 import csv
 import time
-import os
+import sys
 import threading
-import keyboard
 from datetime import datetime
+from pathlib import Path
 from bleak import BleakClient, BleakScanner
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import session
 
 
 NUANIC_SERVICE = "5491faaf-b0c2-4167-8f3d-bc6b31db69e7"
@@ -77,8 +85,7 @@ def save_eda_data():
         log("No EDA data collected.")
         return
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, f"eda_data_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv")
+    path = str(session.stream_path("eda"))
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=records[0].keys())
         writer.writeheader()
@@ -88,12 +95,22 @@ def save_eda_data():
 
 def stop_recording():
     global stop_flag
-    log("F12 pressed — stopping EDA recording...")
+    log("Stop requested — stopping EDA recording...")
     stop_flag = True
 
+
 def listen_for_hotkey():
-    keyboard.add_hotkey("f12", stop_recording)
-    keyboard.wait()
+    """Poll the shared stop signal (stop file, or F12 for a manual abort).
+
+    This is what makes EDA survive. Everything collected lives in `records`
+    in memory until save_eda_data() runs, so the process must be allowed to
+    reach that call rather than being killed.
+    """
+    while not stop_flag:
+        if session.stop_requested():
+            stop_recording()
+            return
+        time.sleep(0.25)
 
 
 async def find_nuanic():

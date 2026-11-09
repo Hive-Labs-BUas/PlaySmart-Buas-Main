@@ -1,3 +1,78 @@
+# OBS for PlaySmart
+
+> Modified 2026-09 (iteration 5). The League section is new; the input-overlay guide
+> below it is iteration 4's and still applies if you want the on-screen keyboard/mouse.
+
+## League of Legends (iteration 5) — five minutes, once per PC
+
+Video is now started and stopped by the capture itself (`src/obs_recorder.py`) over
+obs-websocket, and the file is named after the session id. OBS only needs to be open,
+with the WebSocket server on and one scene that shows the game.
+
+### 1. Import the scene collection
+
+Scene Collection → Import → pick `obs settings\PlaySmart_League.json` → Scene Collection →
+**PlaySmart - League**. It contains one video source, **League Game Capture** (Game Capture
+of `League of Legends.exe`, matched on the executable), plus default desktop audio and mic.
+
+Why Game Capture of the League window and nothing else: the gaze overlay
+(`Emotion_gaze_visualization.py`) is a full-size borderless window. The iteration-4
+collection layered a *Window Capture* of that overlay on top of the game, and *Capture
+any fullscreen application* latches onto it too. That is how the 2025 archive ended up
+with half its video black. The gaze dot can always be re-drawn from `data/gaze/`.
+
+Not included on purpose: the Discord process-audio capture (records other people's voices;
+needs their consent) and the input-overlay sources (need the plugin below; input is already
+recorded as data by `keyboard_recording.py`).
+
+### 2. WebSocket
+
+Tools → **WebSocket Server Settings** → *Enable WebSocket server*, port `4455`, *Enable
+Authentication* on → *Show Connect Info* → copy the password into `.env` as
+`PLAYSMART_OBS_PASSWORD` (or let `setup.ps1` ask for it).
+
+### 3. Video
+
+Settings → Video: Base **1920×1080**, Output **1920×1080**, **60** (or 30) FPS, constant.
+Not 2260×1080 — that canvas was for the overlays and is what `VideoSettingsOBS.png` shows.
+
+### 4. Recording
+
+Settings → Output → Recording:
+
+| setting | value | why |
+|---|---|---|
+| Recording Path | `C:\Users\<user>\Videos` | `obs_recorder` moves the file out by the path OBS reports; the old time-based fallback also looks here |
+| Recording Format | **MKV** (or *Hybrid MP4* on OBS ≥ 30.2) | survives a crash; plain MP4 does not |
+| Encoder | NVENC / hardware if present | x264 at 1080p60 competes with OpenFace for CPU |
+| Automatic File Splitting | off | `StopRecord` reports one file |
+| Settings → Advanced → *Automatically remux to mp4* | **off** | the remux would run on a file that has already been moved |
+| Audio Track | **1 and 2** ticked | track 1 = game sound, track 2 = microphone; see below |
+
+**Audio on separate tracks (added 2026-11-05).** Game sound and the player's voice are
+never mixed into one track: Edit → Advanced Audio Properties → *League Game Audio* →
+track **1** only; *Mic/Aux* → track **2** only, unmuted; *Desktop Audio* muted (Discord,
+music and system sounds stay out). `python src\rig_setup.py` sets all of this over the
+websocket and `preflight.py` prints the layout as `obs audio: track 1: League Game Audio,
+track 2: Mic/Aux` — a `FAIL` there means two inputs share a track. The rig's own
+`data\audio\<sid>_audio.wav` remains the primary voice recording (own timing anchor);
+track 2 is the frame-locked copy. `PLAYSMART_OBS_MIC_TRACK=0` in `.env` mutes the mic in
+OBS instead. The layout actually recorded is written into `<sid>_video.json`
+(`audio_tracks`). Split afterwards with
+`ffmpeg -i <sid>_video.mkv -map 0:a:0 game.wav -map 0:a:1 mic.wav`; check a file with
+`ffprobe <sid>_video.mkv` (two `Audio:` streams).
+
+Hotkeys for start/stop are no longer needed; F7 in the capture window is the only key.
+
+### 5. Check it
+
+With OBS open: `poetry run python src\preflight.py` prints the OBS version, websocket
+version (needs ≥ 5.1, i.e. OBS 29+), canvas size, and whether the current scene has a game
+capture. Then `TESTING.md` section 3 has the three smoke tests and section T5 the timing
+acceptance test.
+
+---
+
 # OBS Input Overlay Setup Guide
 
 > **Show your mouse and keyboard inputs live on screen while recording in OBS.**

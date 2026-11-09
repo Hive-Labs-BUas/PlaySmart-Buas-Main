@@ -1,50 +1,97 @@
 [tool.poetry]
 name = "PlaySmart"
-version = "0.1.0"
+version = "0.2.0"
 package-mode = false
 description = "Enhancing Performance for the Breda Guardians through Data Analytics"
 authors = [
 
 ]
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.md"
 
+# ---------------------------------------------------------------------------
+# Modified 2026-09 (iteration 5, League of Legends port).
+#
+# The main group is exactly what the capture rig imports (src/*.py launched by
+# key_listener.py, plus the QC scripts and the SFTP uploader). `poetry install`
+# now takes minutes instead of an hour because the ~3 GB of Torch/Whisper/YOLO
+# that no capture script imports moved into optional groups:
+#
+#   poetry install                              capture rig only
+#   poetry install --with transcription         + Whisper (PLAYSMART_TRANSCRIBE=1)
+#   poetry install --with vision                + enemy_detection.py / inference.py
+#   poetry install --with legacy                + packages nothing in src/ imports
+#
+# Python is pinned to 3.10: tobii-research 2.0.0 ships cp310 wheels only.
+# ---------------------------------------------------------------------------
+
 [tool.poetry.dependencies]
-python = ">=3.9,<3.11"
-streamlit = { version = "^1.40.2", python = "!=3.9.7" }
+python = ">=3.10,<3.11"
+# gaze + overlay
 tobii-research = "2.0.0"
-matplotlib = "^3.7.2"
-pandas = "^2.1.0"
-numpy = "^1.24.0"
-tensorflow-io-gcs-filesystem = "0.27.0"
-opencv-python = "^4.5.5"
-scikit-learn = "^1.3.0"
 screeninfo = "^0.8.1"
+pygame = "^2.6.1"
+# input + hotkeys
 pynput = "^1.7.7"
 keyboard = "^0.13.5"
-nltk = "^3.9.1"
+# audio
+sounddevice = "^0.5.5"
+soundfile = "^0.12.1"
+# EDA ring (BLE)
+bleak = ">=0.17,<0.20"
+# game state (Live Client Data API) and video (obs-websocket)
+requests = "^2.32.0"
+obsws-python = ">=1.7"
+# orchestration, QC, upload
+psutil = "^5.9.0"
+pandas = "^2.1.0"
+numpy = "^1.24.0"
+matplotlib = "^3.7.2"
+paramiko = "^3.5.0"
+
+[tool.poetry.group.transcription]
+optional = true
+
+[tool.poetry.group.transcription.dependencies]
+# microphone_recording.py imports whisper only when PLAYSMART_TRANSCRIBE=1.
+# Needs ffmpeg on PATH as well (winget install ffmpeg).
+openai-whisper = {git = "https://github.com/openai/whisper.git"}
+torch = "^2.4.1"
+torchaudio = "^2.4.1"
+
+[tool.poetry.group.vision]
+optional = true
+
+[tool.poetry.group.vision.dependencies]
+# enemy_detection.py, inference.py, resize_video.py, infrared.ipynb (iteration 4,
+# Valorant HUD detection). Not started by key_listener.py.
+opencv-python = "^4.5.5"
+ultralytics = "^8.3.77"
 torch = "^2.4.1"
 torchvision = "^0.19.1"
-torchaudio = "^2.4.1"
-openai-whisper = {git = "https://github.com/openai/whisper.git"}
+mss = "^10.0.0"
+moviepy = "^2.1.1"
+
+[tool.poetry.group.legacy]
+optional = true
+
+[tool.poetry.group.legacy.dependencies]
+# Listed in iteration 4's pyproject but imported by nothing under src/ or server/.
+# Kept installable so nothing that used to resolve stops resolving; delete this
+# group once the owners confirm they are unused.
+streamlit = "^1.40.2"
+scikit-learn = "^1.3.0"
+tensorflow-io-gcs-filesystem = "0.27.0"
+nltk = "^3.9.1"
 transformers = "^4.45.0"
 datasets = "^3.0.1"
 librosa = "^0.10.2.post1"
-soundfile = "^0.12.1"
-pygame = "^2.6.1"
 sqlalchemy = "^2.0.36"
 psycopg2-binary = "^2.9.10"
-paramiko = "^3.5.0"
-moviepy = "^2.1.1"
-mss = "^10.0.0"
-ultralytics = "^8.3.77"
-sounddevice = "^0.5.5"
-bleak = ">=0.17,<0.20"
-
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
-flake8 = "*"
+ruff = "*"
 ipykernel = "^6.29.5"
 
 [tool.ruff]
@@ -53,3 +100,9 @@ exclude = [
     "src/riotAPI.ipynb",
     "server/src",
 ]
+
+[tool.ruff.lint]
+# The rule set ruff used by default before 0.16 (pycodestyle errors + Pyflakes). Ruff
+# 0.16 widened its defaults and CI installs the newest ruff, so without this line the
+# Lint job fails on 140+ findings in iteration-4 code that nobody is rewriting.
+select = ["E4", "E7", "E9", "F"]

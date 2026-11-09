@@ -1,136 +1,156 @@
 # Toolkit Setup Guide
 
-## Prerequisites
+> Modified 2026-09 (iteration 5, League of Legends port). Setup is now one script; the
+> manual steps are kept below for when a step of it fails. The full test sequence that
+> proves a capture PC works is in `TESTING.md`.
 
-Before getting started, make sure you have the following installed and available on your system:
+## Quick path (Windows 10/11)
 
-- Python (3.9 or 3.10 is recommended) - https://www.python.org/downloads/release/python-3100/
-- Poetry (dependency manager) - pip install poetry
-- OBS - https://obsproject.com/download
-  - For setting up refer to C:\\...\GitHub\PlaySmart\obs settings\readme.md
-- Tobii Eye Tracker Manager Pro - https://www.tobii.com/products/software/applications-and-developer-kits/tobii-pro-eye-tracker-manager#downloads%22
-- A connected webcam
-- A connected Tobii eye tracker
-- ffmpeg
-
-### Installing ffmpeg
-ffmpeg is required by the Whisper speech-to-text model to decode audio files. Without it, transcription will fail with a `FileNotFoundError`.
-
-The easiest way to install it on Windows is via winget:
-
-```bash
-winget install ffmpeg
+```powershell
+git clone https://github.com/PlaySmart-Buas/PlaySmart-Buas-Main.git C:\League_work\PlaySmart-Buas-Main
+cd C:\League_work\PlaySmart-Buas-Main
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-Alternatively, download it manually from [ffmpeg.org](https://ffmpeg.org/download.html), extract the archive, and add the `bin` folder to your system `PATH` environment variable.
+`setup.ps1` installs Git, Python 3.10, OBS Studio, the VC++ 2017 runtime and GitHub CLI
+(winget), Poetry and the project environment, OpenFace 2.2.0 with its models, and creates
+`.env` from `.env.example` asking for the OBS and SFTP passwords. Re-run it after any
+failure; it skips what is done.
 
-After installing, verify it works by running:
+Then, by hand:
 
-```bash
-ffmpeg -version
-```
+1. **Tobii Pro Eye Tracker Manager** — https://www.tobii.com/products/software/applications-and-developer-kits/tobii-pro-eye-tracker-manager — install, plug in the tracker, calibrate the player.
+2. **League of Legends** — install, log in, open Practice Tool once.
+3. **OBS** — `obs settings\readme.md`, top section: import `PlaySmart_League.json`, enable the WebSocket server, MKV, auto-remux off.
+4. `poetry run python src\preflight.py` — every line `ok` or `warn`, nothing `FAIL`.
 
-If this prints version info, ffmpeg is correctly installed and on your PATH.
+## Prerequisites (manual path)
 
-> [!NOTE]
-> If ffmpeg is not found after installation, restart your terminal so the updated PATH is picked up.
+- Python **3.10** — https://www.python.org/downloads/release/python-3100/ — 3.10 exactly:
+  `tobii-research` ships cp310 wheels only.
+- Poetry — `py -3.10 -m pip install --user pipx ; py -3.10 -m pipx install poetry`
+- OBS Studio 30 or newer — https://obsproject.com/download
+- Tobii Pro Eye Tracker Manager — link above
+- Visual C++ 2017 x64 redistributable (OpenFace needs it)
+- A connected webcam and a connected Tobii eye tracker
+- ffmpeg — **only** if you enable Whisper transcription (`PLAYSMART_TRANSCRIBE=1`):
+  `winget install ffmpeg`
 
-## Setting Up the Poetry Environment
+## Setting up the Poetry environment
 
-1. Verify that Poetry is installed by running:
-
-```bash
-poetry --version
-```
-
-If this command is not found, follow the Poetry installation guide.
-
-2. Open a terminal and navigate to the project folder containing the `pyproject.toml` and `poetry.lock` files:
-
-```bash
-cd path/to/project
-```
-
-3. Install the project dependencies:
-
-```bash
+```powershell
+cd C:\League_work\PlaySmart-Buas-Main
+poetry env use (py -3.10 -c "import sys; print(sys.executable)")
 poetry install
+poetry run python --version        # 3.10.x
 ```
 
-This will create a `.venv` virtual environment folder inside the project directory.
+`poetry install` installs the capture rig only (about 300 MB). The heavy optional groups:
+
+| group | command | needed for |
+|---|---|---|
+| transcription | `poetry install --with transcription` | Whisper after a recording (`PLAYSMART_TRANSCRIBE=1`), plus ffmpeg |
+| vision | `poetry install --with vision` | `enemy_detection.py`, `inference.py`, `resize_video.py` (iteration 4, Valorant HUD) |
+| legacy | `poetry install --with legacy` | packages iteration 4 listed that nothing under `src/` imports |
 
 ## Adding OpenFace to the project folder
 
-A planned future improvement will remove the need for OpenFace, but for now it is still required. The version used for this project is **2.2.0**.
+`setup.ps1` does this. By hand: download `OpenFace_2.2.0_win_x64.zip` from
+https://github.com/TadasBaltrusaitis/OpenFace/releases (or the PlaySmart Google Drive),
+unzip it so that `OpenFace_2.2.0_win_x64\FeatureExtraction.exe` sits in the repo root, then
+**run `download_models.ps1` inside that folder** — the zip does not include the CEN
+patch-expert models and `FeatureExtraction.exe` exits immediately without them.
 
-There are three ways to add it to the project folder:
+OpenFace produces the **`face` stream** (since 2 Nov 2026; it was called `emotion`):
+`data\face\<sid>_face.csv` with the 17 action-unit intensities and 18 presences, head pose,
+webcam gaze and a per-eye eyelid aperture, plus `<sid>_face.json` with the achieved fps and
+the clock anchor. No emotion label is computed and no face image, video or face landmark is
+ever written; OpenFace's scratch folder `output\<sid>\` is deleted when the session ends.
 
-1. Copy it from a nearby machine where the Toolkit is already deployed using a USB stick.
+It is **off on the lab PCs** (`PLAYSMART_SKIP=eda,emotion` in `.env`; `emotion` and `face`
+both work as the name) until the consent form and the DPO decision cover face measurements
+of participants. To record it: remove `emotion` from `PLAYSMART_SKIP`. Knobs in `.env`:
+`PLAYSMART_FACE_CAM=640x480` (webcam size; `1280x720` gives better AUs but costs CPU next
+to League — `check_session.py` warns below 15 fps), `PLAYSMART_FACE_DEVICE=0`,
+`PLAYSMART_FACE_KEEP_LANDMARKS=1` (also keep the 56 eye-region landmarks).
 
-2. Send it to yourself via Discord or MS Teams.
+If a PC has no webcam or no OpenFace, set `PLAYSMART_OPENFACE=0` in `.env`: the overlay
+then runs gaze-only and there is no face stream.
 
-3. Download it from [PlaySmart google account google drive](https://drive.google.com/drive/u/1/my-drive).
+## Secrets: `.env`
 
-Once obtained, unzip OpenFace and place the folder inside the project directory.
+Copy `.env.example` to `.env` and fill in `PLAYSMART_OBS_PASSWORD` (OBS → Tools →
+WebSocket Server Settings → Show Connect Info) and `PLAYSMART_SFTP_PASSWORD`. Every
+recorder reads `.env` at start (`src/session.py`). `.env` is gitignored; the SFTP password
+is no longer in the code.
 
-## Starting the Toolkit
+## Starting the toolkit
 
-1. Ensure your webcam and eye tracker are connected before launching.
-2. Tobii Eye Tracker Manager Pro and OBS are running with correct settings
-3. Run the toolkit by executing the main.bat file:
+1. Webcam, eye tracker and (optionally) the Nuanic ring connected; player calibrated.
+2. OBS running with the PlaySmart - League scene collection.
+3. `main.bat` — it runs the pre-flight check and then the capture orchestrator.
 
- `main.bat` Or double-click it in File Explorer.
+The capture is automatic: **F7 arms**, the recorders start when a League game starts,
+and stop and save when the game ends. **F12 aborts** a running capture. Each session's
+files share one id: `data\<stream>\<session_id>_<stream>.<ext>`, with
+`data\gamestate\<session_id>_meta.json` carrying the Riot ID, champion, mode and map
+from the game client.
 
----
+| key | action |
+|---|---|
+| `F7` | arm — wait for a game, record it, stop when it ends |
+| `F12` | abort the running capture (streams still save) |
 
-## Controls
-
-| Key     | Action          |
-| ------- | --------------- |
-| `F7`  | Start recording |
-| `F12` | Stop recording  |
-
----
+Afterwards: `poetry run python src\check_session.py` says whether the session is usable,
+and `poetry run python src\check_video_sync.py` checks the video against the game clock.
 
 ## Troubleshooting
 
+`TESTING.md` section 8 has the table. The first stop is always
+`poetry run python src\preflight.py`.
+
 > [!TIP]
-> Always make sure your devices are connected *before* launching the toolkit.
+> Devices connected *before* launching; OBS open *before* pressing F7.
 
 > [!NOTE]
-> If Poetry is not found after installation, restart your terminal and verify that Poetry is added to your system `PATH`.
+> If Poetry is not found after installation, open a new terminal.
 
 > [!WARNING]
-> If `poetry install` fails, confirm you are in the correct folder — it must contain `pyproject.toml`.
+> `poetry install` must run in the folder containing `pyproject.toml`.
 
----
-
-## Project Structure
+## Project structure
 
 ```
 project/
-├── .venv/            # Virtual environment (auto-generated)
-├── data
-│   ├── emotion
-│   ├── gaze
-│   ├── input
-│   ├── json
-│   └── video
-├── obs settings
-├── OpenFace_2.2.0_win_x64
-├── src
-│   ├── Emotion_gaze_visualization.py
-│   ├── enemy_detection.py
-│   ├── eye_tracking_script.py
-│   ├── key_listener.py
-│   ├── keyboard_recording.py
-│   ├── nuanic_rings.py
-│   ├── pop_up_screen.py
-│   ├── sftp_upload.py
-│   ├── tobii_research.py
-│   └── models
-|       └── yolov8n.pt
-├── main.bat          # Entry point to launch the toolkit
-├── poetry.lock       # Locked dependency versions
-└── pyproject.toml    # Poetry project configuration
+├── .env                       # passwords and switches (gitignored; see .env.example)
+├── .venv/                     # Poetry environment on Python 3.10
+├── data/                      # every recording; gitignored, never committed
+│   ├── audio  eda  face  gamestate  gaze  input  video
+│   └── json/ign_mapping.json  # Riot ID -> participant id; stays on this PC
+├── obs settings/
+│   ├── PlaySmart_League.json  # scene collection to import
+│   └── readme.md
+├── OpenFace_2.2.0_win_x64/    # not in git; setup.ps1 downloads it
+├── server/python_app/sftp_upload.py
+├── src/
+│   ├── key_listener.py        # orchestrator (F7 / F12)
+│   ├── session.py             # session id, stop signal, .env
+│   ├── liveclient_recorder.py # League game state (Live Client Data API)
+│   ├── obs_recorder.py        # video via obs-websocket, timing anchor
+│   ├── eye_tracking_script.py # gaze (Tobii)
+│   ├── Emotion_gaze_visualization.py  # overlay + OpenFace face stream (AUs, pose)
+│   ├── keyboard_recording.py  # input
+│   ├── microphone_recording.py# audio
+│   ├── nuanic_eda.py          # EDA ring
+│   ├── pop_up_screen.py       # label + upload
+│   ├── preflight.py           # pre-capture checks
+│   ├── check_session.py       # is a recorded session usable?
+│   ├── check_video_sync.py    # video vs game clock
+│   └── enemy_detection.py, inference.py, resize_video.py, merge_datasets.py  # iteration 4
+├── main.bat                   # pre-flight, then capture
+├── setup.ps1                  # one-command setup
+├── TESTING.md                 # setup checks and the test sequence
+├── CHANGELOG.md               # what iteration 5 changed and why
+├── poetry.lock
+└── pyproject.toml
 ```

@@ -1,5 +1,20 @@
-/obs settings/Mouse_Keyboard
-/OpenFace_2.2.0_win_x64
+# Capture output. Everything under data/ is a recording of a real person
+# (gaze, face-derived emotion, voice, physiology) and never enters git.
 /data
-/src/__pycache__
+/output
+*.wav
+*.mkv
+*.mp4
+
+# Secrets: SFTP and OBS websocket passwords live here, see .env.example
+.env
+
+# Tooling
+/OpenFace_2.2.0_win_x64
+/obs settings/Mouse_Keyboard
+__pycache__/
 *.pyc
+/.venv
+/site
+.pytest_cache/
+.ruff_cache/
