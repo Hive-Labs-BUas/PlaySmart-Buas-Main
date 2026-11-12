@@ -248,6 +248,38 @@ def report(sid: str, data_dir: Path) -> bool:
         else:
             print(f"{WARN} events CSV is empty - no kills or objectives were recorded")
 
+    # --- screen / game-window geometry and the game-sound WAV (2026-11-10) ----
+    display_path = data_dir / "gamestate" / f"{sid}_display.json"
+    if display_path.exists():
+        try:
+            disp = json.loads(display_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            disp = {}
+        scr, game = disp.get("screen_px_start"), disp.get("game_px_start")
+        if disp.get("changed"):
+            print(f"\n{WARN} the resolution changed {disp.get('changes')}x during the game "
+                  f"({len(disp.get('segments') or [])} display segments) - map screen coordinates "
+                  "through _display.json, never through one screen size")
+        elif scr and game and list(scr) != list(game):
+            print(f"\n{WARN} display: the game ran at {game[0]}x{game[1]} on a {scr[0]}x{scr[1]} screen")
+        elif scr:
+            print(f"\n{OK} display: {scr[0]}x{scr[1]}, unchanged during the game")
+    else:
+        print(f"\n{WARN} no display log (<sid>_display.json) - recorded before 10 Nov 2026; a resolution "
+              "change during this game would not be visible in the data")
+    game_wav = data_dir / "gameaudio" / f"{sid}_gameaudio.wav"
+    video_json = data_dir / "video" / f"{sid}_video.json"
+    if game_wav.exists():
+        try:
+            ga = json.loads(game_wav.with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            ga = {}
+        flag = OK if ga.get("game_only") and ga.get("t0_unix_ms") else WARN
+        print(f"{flag} game audio: {game_wav.stat().st_size / 1e6:.1f} MB, {ga.get('duration_s', '?')} s"
+              + ("" if ga.get("game_only") else "  (not verified game-only: check OBS's tracks)"))
+    elif video_json.exists():
+        print(f"{WARN} game audio not split out of the video - `python src/obs_recorder.py --extract-audio {sid}`")
+
     audio_anchor = data_dir / "audio" / f"{sid}_audio.json"
     if (data_dir / "audio" / f"{sid}_audio.wav").exists():
         if audio_anchor.exists():

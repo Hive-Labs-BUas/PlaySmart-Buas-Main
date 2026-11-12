@@ -6,6 +6,9 @@ finalised (being terminated left 44-byte files); Whisper transcription is off un
 PLAYSMART_TRANSCRIBE=1 and needs `poetry install --with transcription`.
 Modified 2026-09-23: writes <sid>_audio.json with the wall-clock time of the first
 sample, so the audio can be placed on the game clock.
+Modified 2026-11-10: no keyboard listener of its own. It was a second low-level keyboard
+hook per game (the input recorder already has one) whose only job was F12; the stop file,
+or the abort key read by ``session.stop_requested()`` in a run started by hand, covers it.
 """
 
 import sounddevice as sd
@@ -16,7 +19,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from pynput import keyboard
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import session
@@ -37,18 +39,8 @@ TRANSCRIBE = os.environ.get("PLAYSMART_TRANSCRIBE", "0") == "1"
 filepath = str(session.stream_path("audio", ext="wav"))
 
 print(f"Recording microphone audio to: {filepath}")
-print("Stops when the game ends, or on F12.")
-
-# ------------------ KEY LISTENER ------------------
-def on_press(key):
-    global recording
-    if key == keyboard.Key.f12:
-        print("\nF12 pressed -> stopping recording...")
-        recording = False
-        return False  # stop listener
-
-listener = keyboard.Listener(on_press=on_press)
-listener.start()
+print("Stops when the game ends." if session.under_orchestrator() or not session.abort_key()
+      else f"Stops when the game ends, or on {session.abort_key().upper()}.")
 
 # ------------------ RECORD AUDIO ------------------
 # Leaving this `with` block is what finalises the WAV header, so the loop must

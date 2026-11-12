@@ -27,15 +27,18 @@ def test_frozen_clock_is_not_live_but_loading_screen_is():
 
 
 def test_minimap_rect_estimate_matches_measured_rigs():
-    # measured on the 28 Sep screen recordings (video px at 1920x1080 / screen px)
-    cases = [(1.5, 1920, 1080, (1605, 765, 1917, 1077)),
-             (1.32, 1920, 1080, (1618, 778, 1917, 1077)),
-             (0.3, 2560, 1440, (2268, 1148, 2556, 1436)),
-             (1.0, 2560, 1440, (2187, 1067, 2557, 1437))]
-    for scale, w, h, (x0, y0, x1, y1) in cases:
+    # The map square inside the rim, measured by the app's rim detector on the rigs'
+    # own recordings (10 Nov 2026): (MinimapScale, video w, h, x0, y0, side).
+    cases = [(0.3, 1920, 1080, 1710, 869, 191),      # Pc_5, 28 Sep
+             (0.9, 1280, 720, 1115, 553, 150),       # Pc_1, 28 Sep
+             (0.9, 3440, 1440, 3110, 1106, 299),     # home PC, ultrawide, 30 Oct
+             (1.0, 2560, 1440, 2222, 1099, 307),     # Pc_2, 28 Sep
+             (1.32, 1920, 1080, 1646, 804, 249),     # Pc_3, 28 Sep
+             (1.5, 1920, 1080, 1634, 792, 260)]      # Pc_4, 28 Sep
+    for scale, w, h, x0, y0, side in cases:
         r = lc.estimate_minimap_rect(scale, w, h)
-        assert abs(r["x0"] - x0) <= 8 and abs(r["y0"] - y0) <= 8, (scale, r)
-        assert abs(r["x1"] - x1) <= 4 and abs(r["y1"] - y1) <= 4, (scale, r)
-        assert r["x1"] - r["x0"] == r["y1"] - r["y0"]  # square
+        assert abs(r["x0"] - x0) <= 4 and abs(r["y0"] - y0) <= 4, (scale, r)
+        assert abs((r["x1"] - r["x0"]) - side) <= 3, (scale, r)
+        assert abs((r["x1"] - r["x0"]) - (r["y1"] - r["y0"])) <= 1  # square
     assert lc.estimate_minimap_rect(None, 1920, 1080) is None
     assert lc.estimate_minimap_rect("x", 1920, 1080) is None

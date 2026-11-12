@@ -9,6 +9,16 @@ opening the CSV per event, printing a line per event into the rig log — stalls
 (half-second freezes in game). A writer thread drains the queue into one open file and
 flushes twice a second. Mouse clicks now also carry the button (new last column
 ``button``: left / right / middle / x1 / x2); the other columns are unchanged.
+
+Modified 2026-11-10: ``screen_resolution`` is the screen at the moment of the event. It was
+read once at start, so after a resolution change every later row claimed a grid the mouse
+pixels were no longer on. The writer thread re-reads the size once a second.
+
+Modified 2026-11-10 (game load): these two listeners are the only hooks the rig keeps in
+the path between the keyboard/mouse and the game; the orchestrator starts this process
+above normal priority so the hook never waits for a core. F12 ends the recording only
+when the script is run by hand: under the orchestrator the stop file is the signal, and
+F12 (League's screenshot key) is logged like any other key.
 """
 
 from pynput import mouse, keyboard
@@ -26,6 +36,12 @@ import session
 
 screen = screeninfo.get_monitors()[0]
 screen_resolution = f"{screen.width}x{screen.height}p"
+
+
+def current_resolution(fallback: str) -> str:
+    """``WxHp`` of the primary screen now; the previous value when it cannot be read."""
+    px = session.screen_px()
+    return f"{px[0]}x{px[1]}p" if px else fallback
 
 # Named with the session id at creation, so this file never has to be paired
 # with the other streams by guessing which one is newest.
@@ -56,12 +72,15 @@ def writer_thread(stop):
             w.writerow(["unix_time", "event_type", "details_x", "details_y", "duration", "screen_resolution", "button"])
             print(f"CSV header written: {file_path}")
         last_flush = time.time()
+        res, res_at = current_resolution(screen_resolution), time.time()
         while not (stop.is_set() and events.empty()):
+            if time.time() - res_at > 1.0:
+                res, res_at = current_resolution(res), time.time()
             try:
                 t, kind, x, y, dur, button = events.get(timeout=0.25)
             except queue.Empty:
                 continue
-            w.writerow([t, kind, x, y, dur, screen_resolution, button])
+            w.writerow([t, kind, x, y, dur, res, button])
             counts[kind] = counts.get(kind, 0) + 1
             if time.time() - last_flush > 0.5:
                 fh.flush()
@@ -75,10 +94,14 @@ def on_press(key):
         key_start_times[key_str] = time.time()
 
 
+# By hand: the abort key stops the recording. Under the orchestrator: never (stop file).
+STOP_KEY = None if session.under_orchestrator() else getattr(keyboard.Key, session.abort_key() or "", None)
+
+
 def on_release(key):
     key_str = str(key)
-    if key == keyboard.Key.f12:
-        print("F12 pressed, stopping recording.")
+    if STOP_KEY is not None and key == STOP_KEY:
+        print(f"{key_str} pressed, stopping recording.")
         mouse_listener.stop()  # stop mouse too
         return False           # stop keyboard
     start_time = key_start_times.pop(key_str, None)
@@ -104,7 +127,7 @@ def on_move(x, y):
 
 
 print(f"Keyboard & Mouse logging started -> {file_path}")
-print("Stops when the game ends, or on F12.")
+print("Stops when the game ends." if STOP_KEY is None else f"Stops when the game ends, or on {STOP_KEY}.")
 
 # create the listeners so both can be stopped
 mouse_listener = mouse.Listener(on_click=on_click, on_move=on_move)

@@ -190,11 +190,17 @@ video tens to a few hundred MB depending on encoder bitrate.
 `check_session.py` prints, under `face`, the frame rate OpenFace achieved next to League
 (below 15 fps: lower `PLAYSMART_FACE_CAM`), the blink rate from AU45, and the correlation
 between the eyelid aperture and AU45 — it must be clearly negative, otherwise the
-eye-landmark index layout assumed in `Emotion_gaze_visualization.py` is wrong for this
+eye-landmark index layout assumed in `face_recorder.py` is wrong for this
 OpenFace build. Then open `data\face\<sid>_face.json`: `anchor_source` should be
 `starting_tracking_line` and `anchor_check_minus_anchor_ms` within about ±100 ms. Blink
 for the camera three times at a known game clock and confirm the AU45 onsets land on it
 in `_face.csv` (via `unix_time` → the gamestate clock mapping).
+
+Since 2026-11-10 the face stream is recorded by `face_recorder.py` (no overlay window, no
+eye tracker needed) and only when `PLAYSMART_FACE=1` (or the switch in the app's "Before
+you play"). During the game the app's Gathering panel shows a **Face** row: frames so far,
+the share with a face found over the last 10 s, fps. "no face in view" means turn the
+webcam; "OpenFace is not running" usually means another app (Discord, Teams) holds the camera.
 
 ### T5 — video timing acceptance test (5 min)
 
@@ -262,6 +268,88 @@ has one new line, and `<sid>_players.csv` has ten times the rows of
 `<sid>_gamestate.csv` (five players in a Practice Tool game with bots). No Riot ID
 anywhere in `_players.csv`, `_eog.json` or `_labels.json`.
 
+### T11 — resolution change (10 min, Practice Tool) — added 2026-11-10
+
+The case of 9 Nov. Start the rig, start a Practice Tool game, and during the game:
+1. leave everything alone for a minute;
+2. change the in-game resolution (Esc > Video) to a lower one, play 30 s;
+3. switch to Windowed, play 30 s; switch back to Borderless at the native resolution;
+4. end the game.
+
+Expect: the console (or the app's Gathering panel, **Screen** line) says the resolution
+changed; `data\gamestate\<sid>_display.json` has one segment per step with the right
+`screen_px` and `window`, `changed: true`; `<sid>_video.json` has `geometry_changed: true`
+and `game_source_px_start` / `_end`; the video shows the game filling the frame in every
+step (never in a corner). `check_session.py` prints the display warning. In the app's
+review of that game the gaze dot sits on what you looked at in each step (look at the
+minimap and at your champion on purpose in each).
+
+Also once per PC: set Windows to another resolution **before** starting a game with the rig
+already running; the rig log must show `obs: OBS canvas ... -> ...` and the recording must
+be at the new resolution.
+
+### T12 — game audio as its own file (part of T4) — added 2026-11-10
+
+After the game: `data\gameaudio\<sid>_gameaudio.wav` exists, about as long as the video,
+and contains game sound **without** your voice (talk during the game; play the WAV).
+`_gameaudio.json` says `game_only: true`. If the console says "no ffmpeg": set
+`PLAYSMART_FFMPEG`, or `pip install imageio-ffmpeg` in the rig's environment; the desktop
+app passes its own. Older recordings: `python src\obs_recorder.py --extract-audio --all`.
+
+### T13 — face stream on a rig without an eye tracker (5 min) — added 2026-11-10
+
+`PLAYSMART_FACE=1`, no Tobii plugged in, webcam free. One Practice Tool game. Expect
+`tier: lite` and `face: ON` in the console, `data\face\<sid>_face.csv` with `AU*_r`
+columns, 10 to 30 rows a second (OpenFace is limited to a few cores next to the game, see
+T14; `fps`, `priority` and `cpu_cores` are in `<sid>_face.json`), `success` mostly 1, no
+image file anywhere under `data\` or `output\`, and the `output\<sid>` scratch folder gone
+afterwards. Then T4b on that file.
+
+### T14 — the rig must not cost the game (20 min, Practice Tool) — added 2026-11-10
+
+What the rig runs next to the game, and what it is allowed to cost. Same PC, same game
+settings, the same two-minute routine each time (Practice Tool: three target dummies in
+mid lane, every spell on cooldown, camera unlocked). Frame rate from the game's own counter
+(Ctrl+F), read every 20 s and averaged.
+
+| run | what is running | accept |
+|---|---|---|
+| A | League only (app, rig and OBS closed) | the baseline |
+| B | rig recording, no face (`PLAYSMART_FACE=0`) | within 5 % of A |
+| C | rig recording with the face stream on | within 10 % of A |
+| D | as C, the desktop app open on the second monitor | same as C |
+
+During run C, in PowerShell, twice, 60 s apart:
+
+    Get-Process python,pythonw,FeatureExtraction,obs64 -ErrorAction SilentlyContinue |
+      Format-Table Name,Id,PriorityClass,ProcessorAffinity,@{n='CPU s';e={[math]::Round($_.CPU,1)}}
+
+Expect:
+* one `python` at **AboveNormal** (the input recorder: the only keyboard and mouse hook),
+  `FeatureExtraction` at **BelowNormal** with a `ProcessorAffinity` that covers only the
+  last 1 to 4 logical processors, the microphone and gaze recorders and the orchestrator
+  at Normal, the desktop app (`pythonw`, or `python` under `uv run`) at BelowNormal while
+  the game is recorded and Normal again afterwards;
+* CPU seconds gained in the 60 s: each `python` under 2 s; `FeatureExtraction` at most
+  60 s x its number of processors; `obs64` a few seconds with a GPU encoder (tens of
+  seconds means x264: the app's "Before you play" names the encoder);
+* the rig log says `started input  (priority: above normal)` and
+  `OpenFace: ... (priority below, N of M logical processors)`.
+
+Keys: type and move the mouse in a text editor with the rig recording: no dropped or
+late characters, no cursor stutter. In game, a player who knows the PC says whether it
+feels different from run A; that judgement is the test, write it down. Press F12 (a
+screenshot): under the desktop app the recording goes on; under `main.bat` it aborts
+unless `PLAYSMART_ABORT_KEY=off`.
+
+After the game: OBS > View > Stats shows under 1 % frames missed (rendering lag) and
+under 1 % skipped (encoding lag); if not, cap the game's frame rate at the monitor's
+refresh rate and repeat. `<sid>_face.json`: `fps` at least 10 and
+`anchor_check_minus_anchor_ms` within 500. If C fails on frame rate, lower
+`PLAYSMART_FACE_CORES` by one or set `PLAYSMART_FACE_MODEL=fast`, and repeat C; if `fps`
+is under 10, raise `PLAYSMART_FACE_CORES` by one. Record the numbers of all four runs in
+the results table.
+
 ## 5. Results table
 
 Paste it into the pull request when done.
@@ -278,6 +366,10 @@ Paste it into the pull request when done.
 | T8 overlay off | | | gaze Hz with vs without overlay |
 | T9 gaze validation | | | accuracy px / deg, minimap rect |
 | T10 post-game extras | | | eog, labels, manifest, players.csv rows |
+| T11 resolution change | | | segments in _display.json, gaze on target in each step |
+| T12 game audio | | | WAV length vs video, no voice in it |
+| T13 face stream | | | fps, face found %, cpu_cores |
+| T14 game load | | | frame rate A / B / C / D, CPU s per process, OBS missed and skipped % |
 
 Also record: OBS version, encoder, recording format, tracker model and rate, OpenFace
 present yes/no, ring paired yes/no.

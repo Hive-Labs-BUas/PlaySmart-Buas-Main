@@ -64,6 +64,7 @@ UPLOAD_MAP = {
     "emotion": "/data/emotion/",    # legacy label stream, pre-November sessions only
     "eda": "/data/eda/",
     "audio": "/data/audio/",
+    "gameaudio": "/data/gameaudio/",  # 2026-11-10: game sound only, copied out of the video's track 1
     "gamestate": "/data/gamestate/",
     "video": "/data/video/",
 }

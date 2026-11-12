@@ -16,7 +16,8 @@ to do in OBS is done here, idempotently, from the screen this PC actually has:
   the rig's own WAV as the only voice recording).
 * **Canvas = output = the primary screen** at 30 fps (``--fps 60``). Downscaled output
   makes the minimap unreadable; a canvas that is not the screen puts video on a
-  different pixel grid from the input log.
+  different pixel grid from the input log. The recorder repeats this fit before every
+  recording (``obs_recorder.fit``), so the screen's resolution may change between games.
 * **Recording**: MKV (survives a crash), hardware encoder for the GPU found (NVIDIA →
   nvenc, AMD → amd, Intel → qsv, else x264), quality HQ, into ``--rec-dir``
   (default ``<data>/obs_incoming``), auto-remux off.
@@ -50,11 +51,9 @@ REPO = SRC.parent
 sys.path.insert(0, str(SRC))
 
 import session  # noqa: E402  (loads .env)
+from obs_recorder import AUDIO_SOURCE, SCENE, SOURCE  # noqa: E402  (one definition, used at record time too)
 
 COLLECTION = "PlaySmart - League"
-SCENE = "PlaySmart - League"
-SOURCE = "League Game Capture"
-AUDIO_SOURCE = "League Game Audio"
 LEAGUE_WINDOW = "League of Legends (TM) Client:RiotWindowClass:League of Legends.exe"
 WS_PORT = 4455
 
@@ -229,12 +228,7 @@ def launch_obs(password: str, wait_s: float = 30.0):
 # ------------------------------------------------------------------ OBS: scene and settings
 
 def primary_screen() -> tuple[int, int] | None:
-    try:
-        import screeninfo
-        m = screeninfo.get_monitors()[0]
-        return int(m.width), int(m.height)
-    except Exception:  # noqa: BLE001
-        return None
+    return session.screen_px()
 
 
 def gpu_vendor() -> str:
@@ -309,21 +303,27 @@ def ensure_scene(client) -> None:
         if SOURCE not in [i.get("sourceName") for i in items]:
             change(f"put '{SOURCE}' into '{SCENE}'")
             client.create_scene_item(SCENE, SOURCE, True)
-    # Fill the canvas whatever the game's window size is.
-    screen = primary_screen()
-    if screen:
-        items = _attr(client.get_scene_item_list(SCENE), "scene_items", default=[]) or []
-        for item in items:
-            if item.get("sourceName") == SOURCE:
-                try:
-                    client.set_scene_item_transform(SCENE, item["sceneItemId"], {
-                        "positionX": 0, "positionY": 0, "boundsType": "OBS_BOUNDS_SCALE_INNER",
-                        "boundsAlignment": 0, "boundsWidth": screen[0], "boundsHeight": screen[1],
-                    })
-                except Exception as exc:  # noqa: BLE001
-                    say(f"could not set the source transform ({exc})")
+    # The capture is stretched over the canvas by fit_capture(), after the canvas itself has
+    # been set (2026-11-10: it used to be sized to the *screen* here, before ensure_video ran;
+    # when OBS then refused the new canvas the game sat in a corner of a larger frame).
     say(f"obs scene: '{SCENE}' with '{SOURCE}'")
     ensure_audio(client)
+
+
+def fit_capture(client) -> None:
+    """Canvas = output = the screen, game capture over the whole canvas. The same call the
+    recorder makes right before every recording, so a resolution change between games is
+    picked up without restarting the rig."""
+    if CHECK:
+        return
+    import obs_recorder
+    res = obs_recorder.fit(client)
+    for line in res.get("changes", []):
+        change(line)
+    if res.get("error"):
+        say(f"!! {res['error']}")
+    elif res.get("canvas"):
+        say(f"obs capture: fills the {res['canvas'][0]}x{res['canvas'][1]} canvas")
 
 
 MIC_IN_VIDEO = os.environ.get("PLAYSMART_OBS_MIC_TRACK", "1") != "0"
@@ -539,6 +539,7 @@ def main() -> None:
         return
     ensure_scene(client)
     ensure_video(client, args.fps)
+    fit_capture(client)
     ensure_output(client, rec_dir)
     print("done." if not _changes else f"{len(_changes)} change(s)" + (" (none applied: --check)" if CHECK else ""))
 

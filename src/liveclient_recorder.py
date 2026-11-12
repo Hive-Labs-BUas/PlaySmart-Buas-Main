@@ -384,21 +384,40 @@ def meta_dict(sid: str, data: dict, started_ms: int) -> dict:
     }
 
 
-# Minimap side as a fraction of screen width, per League MinimapScale. Measured on the
-# 28 Sep 2026 screen recordings of five rigs (scales 0.3, 0.9, 1.0, 1.32, 1.5 gave
-# 0.113, 0.138, 0.145, 0.156, 0.163 of the width); linear within 0.003 of each.
+# The minimap's *map square* (inside its black rim), from League's MinimapScale.
+#
 # The HUD scales with screen HEIGHT, not width (an ultrawide has the same minimap as a
-# 16:9 screen of the same height). Measured 2026-10-28 on a 2560x1440 recording at
-# MinimapScale 0.9: map square 300 px, 31 px from the right edge. Linear in the scale.
-MINIMAP_SIDE_PER_H = 0.2083 / 0.9   # side = height * this * scale
-MINIMAP_MARGIN_PER_H = 0.0215       # of screen height, between the map and the screen edge
+# 16:9 screen of the same height), and the square does not shrink to nothing at scale 0:
+# side = (A + B * scale) * height. Measured 2026-11-10 with the desktop app's rim detector
+# on the recordings of five lab rigs (28 Sep) and two more PCs (26 Oct - 5 Nov):
+#
+#     scale   0.30    0.90    1.00    1.32    1.50
+#     side/H  0.1769  0.2083  0.2132  0.2306  0.2407      (fit within 0.001 of each)
+#
+# The gap to the right screen edge grows slightly with the scale as well (0.0176 to
+# 0.0241 of H); the bottom gap is ~0.002 H larger. History: the first fit (28 Sep) was of
+# the minimap *including its frame* and scaled with the width; the 29 Oct fix made it
+# height-based but proportional to the scale (side = 0.2314 * scale * H), which is right
+# at 0.9 only: at 0.3 it gave 75 px for a 191 px square and the app's calibration, seeded
+# from the same formula, could not find the map at all.
+MINIMAP_SIDE_A, MINIMAP_SIDE_B = 0.1609, 0.0532          # side / H = A + B * scale
+MINIMAP_RIGHT_A, MINIMAP_RIGHT_B = 0.0160, 0.0054        # right gap / H
+MINIMAP_BOTTOM_EXTRA = 0.0020                            # bottom gap - right gap, / H
+
+
+def minimap_square(minimap_scale: float, width: int, height: int) -> tuple:
+    """(x0, y0, side) of the map square in pixels for a MinimapScale and a frame size."""
+    side = (MINIMAP_SIDE_A + MINIMAP_SIDE_B * minimap_scale) * height
+    right = (MINIMAP_RIGHT_A + MINIMAP_RIGHT_B * minimap_scale) * height
+    bottom = right + MINIMAP_BOTTOM_EXTRA * height
+    return width - right - side, height - bottom - side, side
 
 
 def estimate_minimap_rect(minimap_scale, width: int, height: int) -> "dict | None":
-    """Where the minimap sits for a MinimapScale, on a screen of this size.
+    """Where the minimap's map square sits for a MinimapScale, on a screen of this size.
 
-    Good to about ten pixels at 1440p. A measured rectangle (``gaze_validation.py
-    --rect-only``) always wins over this.
+    Good to about three pixels at 1080p on the seven PCs it was fitted on. A measured
+    rectangle (``gaze_validation.py --rect-only``) always wins over this.
     """
     try:
         scale = float(minimap_scale)
@@ -406,11 +425,10 @@ def estimate_minimap_rect(minimap_scale, width: int, height: int) -> "dict | Non
         return None
     if not (0.1 <= scale <= 2.5) or width <= 0 or height <= 0:
         return None
-    side = MINIMAP_SIDE_PER_H * scale * height
-    margin = MINIMAP_MARGIN_PER_H * height
-    x1, y1 = width - margin, height - margin
-    return {"x0": round(x1 - side), "y0": round(y1 - side), "x1": round(x1), "y1": round(y1),
+    x0, y0, side = minimap_square(scale, width, height)
+    return {"x0": round(x0), "y0": round(y0), "x1": round(x0 + side), "y1": round(y0 + side),
             "screen_px": [width, height], "minimap_scale": scale,
+            "what": "map square inside the minimap's rim",
             "source": "estimated from the client's MinimapScale (liveclient_recorder.estimate_minimap_rect)"}
 
 
@@ -470,8 +488,15 @@ def add_identity(meta: dict, meta_file: Path) -> None:
     # which streams were deliberately not started. Added 2026-10-27 so the analysis
     # can tell "no gaze file" (lite rig) from "gaze recorder died" (full rig).
     meta["capture_tier"] = os.environ.get(playsmart_session.ENV_TIER_RESOLVED, "")
-    meta["streams_skipped"] = sorted(
-        p.strip() for p in os.environ.get(playsmart_session.ENV_SKIP, "").split(",") if p.strip())
+    # 2026-11-10: the *resolved* skip set (PLAYSMART_SKIP + the lite tier's streams + face
+    # unless it was switched on), not the raw PLAYSMART_SKIP: the raw value did not say that
+    # a lite rig has no gaze, or that the face stream was simply never turned on.
+    try:
+        meta["streams_skipped"] = sorted(playsmart_session.skip_set(meta["capture_tier"] or None))
+    except Exception:  # noqa: BLE001
+        meta["streams_skipped"] = sorted(
+            p.strip() for p in os.environ.get(playsmart_session.ENV_SKIP, "").split(",") if p.strip())
+    meta["face_enabled"] = "face" not in meta["streams_skipped"]
     # Session context from the client (added 25 Sep 2026): the game and input
     # settings (where the minimap is, which key is a ping), the queue (solo queue /
     # custom / ranked) and the account's tier. Each part is best-effort.

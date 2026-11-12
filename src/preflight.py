@@ -256,13 +256,18 @@ def check_tracker() -> None:
 
 
 def check_openface() -> None:
-    if os.environ.get("PLAYSMART_OPENFACE", "1") == "0" or skipped("face"):
-        why = "lite tier" if TIER == "lite" else "PLAYSMART_OPENFACE=0 / PLAYSMART_SKIP"
-        report(WARN, "openface", f"off ({why}) - no face stream (action units, head pose)")
+    # 2026-11-10: the face stream is opt-in (PLAYSMART_FACE=1) and no longer tied to the tier.
+    if not session.face_wanted():
+        report(OK, "openface", "face stream off (PLAYSMART_FACE is not 1) - no action units this session")
         return
-    exe = REPO / "OpenFace_2.2.0_win_x64" / "FeatureExtraction.exe"
-    if not exe.is_file():
-        report(FAIL, "openface", f"{exe.relative_to(REPO)} missing - setup.ps1 downloads it, or set PLAYSMART_OPENFACE=0")
+    if os.environ.get("PLAYSMART_OPENFACE", "1") == "0" or {"face", "emotion"} & {
+            p.strip().lower() for p in os.environ.get("PLAYSMART_SKIP", "").split(",")}:
+        report(WARN, "openface", "PLAYSMART_FACE=1 but face/emotion is in PLAYSMART_SKIP (or PLAYSMART_OPENFACE=0): no face stream")
+        return
+    exe = session.openface_exe()
+    if exe is None:
+        report(FAIL, "openface", "PLAYSMART_FACE=1 but FeatureExtraction.exe was not found - copy OpenFace_2.2.0_win_x64 "
+               "next to the rig (setup.ps1 downloads it) or set PLAYSMART_OPENFACE_EXE")
         return
     models = exe.parent / "model" / "patch_experts"
     cen = list(models.glob("cen_patches_*.dat")) if models.is_dir() else []
@@ -520,7 +525,7 @@ def check_streams() -> None:
     streams = ["gamestate", "gaze", "face", "input", "audio", "eda", "video"]
     disabled = {
         "gaze": skipped("gaze"),
-        "face": skipped("face") or os.environ.get("PLAYSMART_OPENFACE", "1") == "0",
+        "face": not session.face_enabled(),
         "input": skipped("input"),
         "audio": skipped("audio"),
         "eda": skipped("eda"),

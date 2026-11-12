@@ -4,6 +4,51 @@ All changes to the capture toolkit, with the reason for each. Apache 2.0 asks th
 modified files say so; every file touched carries a `Modified 2026-09` / `Added 2026-09`
 notice at the top, and this file is the index.
 
+## 2026-11-10 (later) — staying out of the game's way
+
+An audit of what the rig does while a game runs. Nothing here has run on a lab PC yet:
+T14 in `TESTING.md` is the measurement (frame rate and input delay with and without the rig).
+
+| file | change | reason |
+|---|---|---|
+| `src/session.py` | `stop_requested()` no longer calls `keyboard.is_pressed("f12")`: under the orchestrator the stop file is the only signal; a recorder started by hand reads the abort key with `GetAsyncKeyState` (`key_down`). New: `abort_key()` (`PLAYSMART_ABORT_KEY`: f12 default, any function key, `off`), `RECORDER_PRIORITY`, `priority_flags()`, `set_priority()`, `face_cores()`, `face_priority()`, `core_mask()`, `limit_cores()`. | `keyboard.is_pressed` installs a system-wide low-level keyboard hook in the calling process. Every recorder polls `stop_requested()`, the orchestrator polled F12 itself and the microphone recorder had a pynput listener of its own: five to seven Python hooks in series, and Windows hands a key press to the game only after the last one returns. One hook is left (the input recorder's). |
+| `src/key_listener.py` | Recorders start at the priority in `session.RECORDER_PRIORITY`: input above normal, audio and gaze normal, face and EDA below normal; always explicit. F12 and F7 read with `key_down` (no hook). `PLAYSMART_ABORT_KEY=off` watches no key. The post-game step (`pop_up_screen.py`: stats, index, upload) runs below normal. | The input recorder's hook is in the path of every key and mouse event, so it must never wait for a core; it uses microseconds of CPU. Audio and gaze are fed by device threads and lose samples when starved. Explicit, because a child inherits a below-normal parent's class and the desktop app lowers itself during a game. F12 is League's screenshot key. |
+| `src/keyboard_recording.py` | F12 stops the recorder only in a run by hand; under the orchestrator it is logged like any key. | It used to end the input stream on a screenshot while the other streams went on. |
+| `src/microphone_recording.py` | The pynput keyboard listener is gone. | A second keyboard hook whose only job was F12. |
+| `src/face_recorder.py` | OpenFace starts below normal priority, on the last `face_cores()` logical processors (a quarter of the machine, 1 to 4; `PLAYSMART_FACE_CORES`, `PLAYSMART_FACE_PRIORITY`), with its BLAS threads capped to match. `PLAYSMART_FACE_MODEL=fast` selects the CLNF landmark model when it is installed. `priority`, `cpu_cores`, `cpu_logical`, `model` in `<sid>_face.json`. The clock cross-check is the smallest `now - timestamp`, not the 5th percentile. | OpenFace is the one heavy process next to the game: it spreads over every core it can see, and a thread of it on the sibling of the game's main core costs frame rate at any priority. The last processors are the efficiency cores on a hybrid CPU and one physical core's two threads otherwise. A limited OpenFace may process fewer frames than the webcam delivers; frames then wait in its queue and arrive late, which the percentile read as a clock error. Rows keep the capture time of their frame. |
+| `src/eye_tracking_script.py` | The live progress file takes the valid share from a running count. | It recounted every sample every two seconds (100,000 dicts by the end of a game) on the thread the tracker's callback stamps samples on. |
+| `src/obs_recorder.py` | The game-audio split (ffmpeg) runs below normal priority. | It runs right after a game, when the next one may be loading. |
+| `src/probe.py` | OBS check reports the recording encoder and warns on a software encoder (x264); new `game load` check: the hooks, OpenFace's priority and cores, the abort key. | A CPU encoder takes frame rate for the whole game and nothing said so. |
+| `.env.example`, `TESTING.md` | The four switches; T14 (frame rate, input delay, hooks, OpenFace load). | |
+| `tests/test_game_load.py` | 9 tests: no capture script asks the `keyboard` package for a key, stop file only under the orchestrator, abort-key and core arithmetic, the face json records the limit, the fast model only when installed. | |
+
+Not changed, on purpose: OBS's own settings beyond the encoder check (process priority,
+frame rate, quality); the game's frame-rate cap (a player's own setting: if the video check
+reports dropped frames on a PC, cap the game at the monitor's refresh rate so OBS gets GPU
+time); the upload (with `PLAYSMART_UPLOAD=keep` it still runs right after each game and the
+rig is not armed again until it finishes: for back-to-back games set `off` and run
+`upload_session.py --all` at the end of the evening).
+
+## 2026-11-10 — resolution changes, game audio as its own file, face stream without the overlay
+
+After the first outside testers (9 Nov, feedback document `App Feedback & Suggestions 2`):
+a lab screen had been left at 1920x1080 (native 2560x1440), the game's resolution was
+changed during a game, and afterwards neither the video nor the gaze sat where they should.
+
+| file | change | reason |
+|---|---|---|
+| `src/display_watch.py` **new** | Once a second: the primary screen size and the League game window's client rectangle, kept as segments (one entry per change) in `gamestate/<sid>_display.json`; `changed`, `changes`, `screen_px_start`, `game_px_start`. Live summary in `rig_status.json` (`counters.display`). | Every pixel-based stream assumed the screen it saw at start. A change is now on record with its time, so a gaze or mouse coordinate can be turned into a fraction of the game frame at any moment. |
+| `src/obs_recorder.py` | `fit()` before every `start_record`: canvas = output = the screen *now*, game capture stretched over the canvas (was: once, at rig start, sized to the screen even when OBS kept another canvas, which put the game in a corner of the frame). Geometry at start and end in `<sid>_video.json` (`screen_px_start/_end`, `game_source_px_start/_end`, `frame_in_video`, `geometry_changed`). `PLAYSMART_OBS_FIT=0` switches it off. | The screen can change between games while the rig keeps running. |
+| `src/obs_recorder.py` | `extract_game_audio()`: after the game, recording track 1 (game sound only) is copied to `gameaudio/<sid>_gameaudio.wav` (48 kHz PCM) with `_gameaudio.json` (`t0_unix_ms` of the video, `game_only`). `python src/obs_recorder.py --extract-audio --all` back-fills older recordings. ffmpeg from `PLAYSMART_FFMPEG`, imageio-ffmpeg or PATH. | Bram: three files per session, mic / game audio / video. The video keeps both tracks. |
+| `src/face_recorder.py` **new** | The face stream of 2 Nov (OpenFace `-aus -pose -gaze`, no images, no emotion label, eyelid aperture, clock anchor from `Starting tracking`) without the pygame overlay and without the Tobii library; progress file for the app's in-game panel. | The overlay script was skipped everywhere, so no League session ever had a face stream. `PLAYSMART_OVERLAY=1` still runs the old overlay. |
+| `src/session.py` | `PLAYSMART_FACE=1` switches the face stream on (default off); `face` left the lite tier's skip set; `openface_exe()` looks next to the rig, one folder up, in a sibling `PlaySmart-Buas-Main`, in `%LOCALAPPDATA%\PlaySmart`; `refresh_env()` re-reads switches when a game starts; `screen_px()` reads the screen now, in physical pixels. | Face needs a webcam and consent, not an eye tracker; the app's switch must work without restarting the rig. |
+| `src/key_listener.py` | Starts the display watcher, the window-less face recorder (when on), copies the game audio out after the stop, expects `gameaudio` in the session output, prints why face is off. | Wiring. |
+| `src/rig_setup.py` | The capture is fitted to the canvas *after* the canvas is set (`fit_capture`), through the recorder's own `fit()`. | Order bug behind the "game in a corner" recordings. |
+| `src/keyboard_recording.py` | `screen_resolution` is the screen at the moment of each event (re-read once a second). | Mouse pixels after a resolution change were labelled with the old grid. |
+| `src/liveclient_recorder.py` | `minimap_square()`: the map square inside the rim is `(0.1609 + 0.0532 x MinimapScale) x height`, fitted on seven PCs' recordings (0.3 to 1.5). `streams_skipped` in the meta is the resolved set; `face_enabled` added. | The 29 Oct formula was proportional to the scale: right at 0.9 only, 75 px for a 191 px square at 0.3. The test for it had been failing since. |
+| `src/probe.py`, `src/check_session.py`, `src/pop_up_screen.py` | Readiness: face, screen vs game window vs OBS canvas, game audio. Session check: display log, game audio. Upload map: `gameaudio`. | So a missing piece is seen before or right after the game. |
+| `tests/test_capture_geometry.py` **new** | Display segments, OBS fit with a fake websocket client, game-audio split on a synthetic two-track recording, the face recorder against a fake OpenFace, env refresh. | None of it needs OBS, a Tobii, a webcam or Windows. **Not yet run on rig hardware**: TESTING.md T11 to T13. |
+
 ## Iteration 5 — 2026-09 — League of Legends port of the capture rig
 
 Team: Hristiyan Georgiev (BUas ADS&AI year 3) with two teammates; mentor Bram Heijligers;
