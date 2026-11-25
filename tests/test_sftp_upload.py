@@ -102,6 +102,16 @@ class _Sftp(SFTPServerInterface):
         return paramiko.SFTP_OK
 
 
+@pytest.fixture(autouse=True)
+def _upload_switched_on(monkeypatch):
+    """These tests upload to a server of their own, whatever this PC's .env says.
+
+    ``session`` loads the rig's ``.env`` on import; with ``PLAYSMART_UPLOAD=off`` in it (the
+    setting of a home PC) every test that relies on the default mode saw "off".
+    """
+    monkeypatch.setenv("PLAYSMART_UPLOAD", "keep")
+
+
 @pytest.fixture
 def sftp_server(tmp_path):
     root = tmp_path / "srv"

@@ -350,6 +350,25 @@ refresh rate and repeat. `<sid>_face.json`: `fps` at least 10 and
 is under 10, raise `PLAYSMART_FACE_CORES` by one. Record the numbers of all four runs in
 the results table.
 
+### T15 — OBS set up by the recorder (10 min, Practice Tool) — added 2026-11-12
+
+The case of 12 Nov: OBS is not the OBS the rig set up when it started.
+
+1. With PlaySmart running, open OBS and make a new scene by hand: a Display Capture, and
+   leave Desktop Audio unmuted. Make that scene the one on screen. Play some music.
+2. Start a Practice Tool game, stay a minute, leave.
+3. `rig.log` shows `obs: the 'PlaySmart - League' scene was not in use - set up now`; in OBS
+   the PlaySmart scene is on screen and Desktop Audio is muted.
+4. The clip of that game has the game's sound and no music; `<sid>_video.json` has
+   `"scene": {"ready_at_start": false, "changes": [...]}`.
+5. Close OBS completely, start another Practice Tool game: OBS starts by itself and the
+   game is recorded (`obs: OBS is closed - starting it`).
+6. In OBS, Tools > WebSocket Server Settings: generate a new password, apply. Start a
+   game: it is still recorded (the rig reads the new password from OBS's config).
+
+Pass: 3, 4, 5 and 6 as described. A PC whose OBS must stay as set up by hand:
+`PLAYSMART_OBS_SETUP=0`; step 3 then prints a warning instead.
+
 ## 5. Results table
 
 Paste it into the pull request when done.

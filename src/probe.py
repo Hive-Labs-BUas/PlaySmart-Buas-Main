@@ -77,16 +77,29 @@ def _obs() -> dict:
         except Exception:  # noqa: BLE001
             encoder = None
         software = bool(encoder) and any(k in encoder.lower() for k in ("x264", "software"))
+        # Is the scene on screen the PlaySmart one? When it is not (OBS installed or changed
+        # after the rig started), the recorder sets it up itself when the next game starts;
+        # the panel says so instead of staying silent.
+        scene_ready = None
+        try:
+            import obs_recorder
+            scene_ready = obs_recorder.scene_ready(c)
+        except Exception:  # noqa: BLE001
+            scene_ready = None
+        scene_note = ("" if scene_ready is None else ", PlaySmart scene in use" if scene_ready
+                      else ", another scene on screen: the PlaySmart scene is set up when a game starts")
         why = ("OBS records with the software encoder (x264): that costs frame rate in game. "
                "Run rig_setup.py again, or pick the GPU encoder under Settings > Output > Recording.") if software else ""
         return {"ok": True, "detail": f"OBS {ver.obs_version}, websocket {ver.obs_web_socket_version}{', ' + size if size else ''}"
-                                      f"{', encoder ' + encoder if encoder else ''}{', recording now' if rec else ''}", "why": why,
-                "canvas": canvas, "recording": bool(rec), "encoder": encoder, "software_encoder": software}
+                                      f"{', encoder ' + encoder if encoder else ''}{', recording now' if rec else ''}{scene_note}", "why": why,
+                "canvas": canvas, "recording": bool(rec), "encoder": encoder, "software_encoder": software,
+                "scene_ready": scene_ready}
     except ImportError:
         return {"ok": False, "detail": "obsws-python not installed", "why": "Run poetry install in the rig folder."}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "detail": f"cannot connect ({type(exc).__name__})",
-                "why": "OBS is not running or its WebSocket is off / wrong password. The rig launcher (rig_setup.py) starts and configures it; the desktop app does this at start."}
+                "why": "OBS is not running, or its WebSocket is off or has another password than the rig knows. "
+                       "Press Set up OBS (or run rig_setup.py); the recorder also tries this itself when a game starts."}
 
 
 def _league() -> dict:

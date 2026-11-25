@@ -68,7 +68,10 @@ def game_window() -> "dict | None":
         import ctypes
         from ctypes import wintypes
         session.screen_px()                      # sets DPI awareness: physical pixels below
-        user32 = ctypes.windll.user32
+        # A handle of our own: argtypes set on the shared ctypes.windll.user32 apply to every
+        # module in the process, and screeninfo calls GetMonitorInfoW with another structure
+        # (its monitor callback then failed with an ArgumentError in every session's log).
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
 
         class MONITORINFO(ctypes.Structure):
             _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),

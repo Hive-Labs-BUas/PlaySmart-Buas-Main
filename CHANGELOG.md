@@ -4,6 +4,34 @@ All changes to the capture toolkit, with the reason for each. Apache 2.0 asks th
 modified files say so; every file touched carries a `Modified 2026-09` / `Added 2026-09`
 notice at the top, and this file is the index.
 
+## 2026-11-15 — what the first recordings from an installed PC showed
+
+Two sessions recorded on a lab PC on 12 Nov with the installed app were checked stream by
+stream. Every stream was there and usable; the log showed two faults.
+
+| file | change | reason |
+|---|---|---|
+| `src/key_listener.py` | When the post-game step fails, its exit code and the last lines of its error output are printed. | On the installed PC `rig.log` said "Post-game step failed." after every game and nothing else. The cause was in the installer, not here: it did not bundle `server/python_app`, which `pop_up_screen.py` imports, so no stats, manifest, index or upload were ever made there. Fixed in the team repository's `installer/build.ps1`, which now also tests that import before packing. |
+| `src/display_watch.py` | The game-window lookup uses a `user32` handle of its own. | It set `argtypes` on the shared `ctypes.windll.user32`; `screeninfo`, used in the same process, then failed in its monitor callback with an `ArgumentError` in every session's log. |
+
+Not run on a lab PC yet.
+
+## 2026-11-12 — OBS is set up before every recording, not only when the rig starts
+
+Found in the in-person test of 12 Nov: on a PC where OBS was installed after the app had
+started, `rig_setup.py` had found no OBS, said so only in `rig.log`, and never ran again.
+The scene was then made by hand with Desktop Audio, so the recordings of the first games
+hold everything the PC played: the game, the player's music and the voice chat.
+
+| file | change | reason |
+|---|---|---|
+| `src/obs_recorder.py` | New `prepare()`, called by `start()` before every recording: when the League capture is missing or the scene on screen is not the one that holds it, `rig_setup.ensure_scene` runs (scene, capture, audio); otherwise only `rig_setup.ensure_audio` (game sound alone on track 1, Desktop Audio muted). New `scene_ready()`. When OBS does not answer, `_client_after_setup()` repairs the connection first: the WebSocket password is read from OBS's own config (`rig_setup.ensure_websocket`), and OBS is started when it is closed. `<sid>_video.json` gains `scene`: `ready_at_start`, `self_setup`, `changes`, `error`. `PLAYSMART_OBS_SETUP=0` switches all of it off. | A set-up step that runs once and stays silent when it could not run leaves the PC unconfigured for as long as the app stays open. Recording Desktop Audio is a consent problem, not a cosmetic one: it holds other people's voices. The recorder is the last point before a recording where this can be put right, and it is its own process, so the few seconds it may take block nothing else. |
+| `src/probe.py` | The OBS check says whether the PlaySmart scene is the one on screen (`scene_ready`) and, when OBS is not reachable, that Set up OBS or the next game repairs it. | The panel used to say "OBS not reachable" with a hint that only the rig's start could act on. |
+| `.env.example`, `TESTING.md` | `PLAYSMART_OBS_SETUP`; T15. | |
+| `tests/test_capture_geometry.py` | 5 tests: a hand-made scene is replaced, the PlaySmart scene only gets its audio checked, a capture in a scene that is not on screen does not count, the switch, a failing setup is reported and not raised. | |
+
+Not run against a real OBS: T15 is that run.
+
 ## 2026-11-10 (later) — staying out of the game's way
 
 An audit of what the rig does while a game runs. Nothing here has run on a lab PC yet:

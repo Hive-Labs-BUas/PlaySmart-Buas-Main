@@ -312,3 +312,78 @@ def test_refresh_env_follows_the_file_but_not_over_the_shell(tmp_path, monkeypat
     env.write_text("PLAYSMART_SKIP=eda\n")                    # line removed
     assert session.refresh_env(("PLAYSMART_FACE",), env) == {"PLAYSMART_FACE": None}
     assert "PLAYSMART_FACE" not in os.environ
+
+
+# ----------------------------------------------------------------------------- OBS set up before a recording
+class FakeSetup:
+    """Stands in for rig_setup: records which part of the setup the recorder asked for."""
+
+    def __init__(self):
+        self._changes, self.calls = [], []
+
+    def ensure_scene(self, client):
+        self.calls.append("scene")
+        self._changes.append("create scene 'PlaySmart - League'")
+
+    def ensure_audio(self, client):
+        self.calls.append("audio")
+
+
+class HandMadeOBS(FakeOBS):
+    """OBS as a person set it up by hand: another scene on screen, no League capture in it."""
+
+    def get_current_program_scene(self):
+        return SimpleNamespace(current_program_scene_name="Scene")
+
+    def get_scene_item_list(self, scene):
+        return SimpleNamespace(scene_items=[{"sceneItemId": 1, "sourceName": "Display Capture"}])
+
+
+def test_a_hand_made_scene_is_replaced_before_recording(monkeypatch):
+    fake = FakeSetup()
+    monkeypatch.setitem(sys.modules, "rig_setup", fake)
+    monkeypatch.setattr(obs_recorder, "SELF_SETUP", True)
+    out = obs_recorder.prepare(HandMadeOBS())
+    assert out["scene_was_ready"] is False
+    assert fake.calls == ["scene"]                     # the whole scene, which sets the audio too
+    assert out["changes"] == ["create scene 'PlaySmart - League'"] and out["error"] is None
+
+
+def test_the_playsmart_scene_only_gets_its_audio_checked(monkeypatch):
+    fake = FakeSetup()
+    monkeypatch.setitem(sys.modules, "rig_setup", fake)
+    monkeypatch.setattr(obs_recorder, "SELF_SETUP", True)
+    out = obs_recorder.prepare(FakeOBS())
+    assert out["scene_was_ready"] is True and fake.calls == ["audio"] and out["changes"] == []
+
+
+def test_the_capture_in_a_scene_that_is_not_on_screen_does_not_count():
+    class OtherSceneOnScreen(FakeOBS):
+        def get_current_program_scene(self):
+            return SimpleNamespace(current_program_scene_name="Scene")
+
+        def get_scene_item_list(self, scene):
+            items = [{"sceneItemId": 7, "sourceName": obs_recorder.SOURCE}] if scene == obs_recorder.SCENE else []
+            return SimpleNamespace(scene_items=items)
+
+    assert obs_recorder.scene_ready(FakeOBS()) is True
+    assert obs_recorder.scene_ready(OtherSceneOnScreen()) is False
+
+
+def test_self_setup_can_be_switched_off(monkeypatch):
+    fake = FakeSetup()
+    monkeypatch.setitem(sys.modules, "rig_setup", fake)
+    monkeypatch.setattr(obs_recorder, "SELF_SETUP", False)
+    out = obs_recorder.prepare(HandMadeOBS())
+    assert fake.calls == [] and out["scene_was_ready"] is False
+
+
+def test_a_setup_that_fails_is_reported_not_raised(monkeypatch):
+    class Broken(FakeSetup):
+        def ensure_scene(self, client):
+            raise RuntimeError("obs said no")
+
+    monkeypatch.setitem(sys.modules, "rig_setup", Broken())
+    monkeypatch.setattr(obs_recorder, "SELF_SETUP", True)
+    out = obs_recorder.prepare(HandMadeOBS())
+    assert "obs said no" in out["error"]

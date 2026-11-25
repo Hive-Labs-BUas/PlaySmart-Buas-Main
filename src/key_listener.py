@@ -589,8 +589,16 @@ def run_capture(dry_run: bool, dry_seconds: float) -> bool:
         print("Post-game: stats, manifest, index, upload…")
         # Below normal: the player may already be in the next champion select or game.
         result = subprocess.run([sys.executable, str(SRC / "pop_up_screen.py")],
-                                cwd=str(REPO), env=child_env(sid), creationflags=session.priority_flags("below"))
-        print("Post-game step finished." if result.returncode == 0 else "Post-game step failed.")
+                                cwd=str(REPO), env=child_env(sid), creationflags=session.priority_flags("below"),
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        if result.returncode == 0:
+            print("Post-game step finished.")
+        else:
+            # Say why: under the desktop app the child's own error output reached no log, and
+            # "failed" alone hid a missing module on every installed PC for weeks.
+            print(f"Post-game step failed (exit code {result.returncode}): no stats, manifest, index or upload for {sid}.")
+            for line in (result.stderr or "").strip().splitlines()[-12:]:
+                print(f"    {line}")
 
     print(f"=== SESSION {sid} complete ===\n")
     session.write_status(state="idle", last_session_id=sid, session_id="")

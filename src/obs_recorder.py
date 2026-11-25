@@ -519,6 +519,84 @@ def _move_with_retry(source: Path, target: Path, attempts: int = 5) -> bool:
     return False
 
 
+SELF_SETUP = os.environ.get("PLAYSMART_OBS_SETUP", "1") != "0"
+
+
+def scene_ready(client) -> bool:
+    """Whether a recording started now is made from a scene that holds the League capture.
+
+    False when the capture source does not exist, or exists only in a scene OBS is not
+    showing: OBS records the scene on screen, whatever it contains.
+    """
+    found = _game_item(client)
+    if not found:
+        return False
+    try:
+        cur = _attr(client.get_current_program_scene(), "current_program_scene_name", "scene_name", default=None)
+    except Exception:  # noqa: BLE001
+        return False
+    return cur == found[0]
+
+
+def prepare(client) -> dict:
+    """Make sure the recording comes from the PlaySmart scene with only the game's sound.
+
+    ``rig_setup.py`` does this when the rig starts, but OBS may not have been installed,
+    running or reachable then, and a scene made by hand records Desktop Audio: everything
+    the PC plays, including music and other people's voices in a voice chat. So the same
+    setup runs again right before every recording: the whole scene when it is missing or
+    not the one on screen, otherwise only the audio routing. Both are idempotent.
+    ``PLAYSMART_OBS_SETUP=0`` switches this off for a PC whose OBS is set up by hand.
+
+    Returns:
+        ``{"scene_was_ready", "changes", "error"}``: whether nothing but the audio had to be
+        checked, what was changed, and the reason when the setup could not run.
+    """
+    out: dict = {"scene_was_ready": scene_ready(client), "changes": [], "error": None}
+    if not SELF_SETUP:
+        return out
+    try:
+        import rig_setup
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"OBS setup not available ({exc})"
+        return out
+    before = len(rig_setup._changes)
+    try:
+        if out["scene_was_ready"]:
+            rig_setup.ensure_audio(client)
+        else:
+            rig_setup.ensure_scene(client)      # the scene, the capture, then the audio
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"OBS setup failed ({exc})"
+    out["changes"] = list(rig_setup._changes[before:])
+    return out
+
+
+def _client_after_setup():
+    """Connect once more after repairing the WebSocket settings, starting OBS when it is closed.
+
+    For a PC where OBS was installed, or its WebSocket switched on, after the rig started:
+    the password OBS has is then not the one in ``.env``. ``rig_setup.ensure_websocket``
+    reads it from OBS's own config (or writes one when OBS is closed).
+    """
+    global PASSWORD
+    if not SELF_SETUP:
+        return None
+    try:
+        import rig_setup
+        password = rig_setup.ensure_websocket()
+        if not password:
+            return None
+        PASSWORD = password
+        if not rig_setup.obs_running():
+            print("  obs: OBS is closed - starting it")
+            return rig_setup.launch_obs(password)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! obs: could not repair the connection ({exc})")
+        return None
+    return _client()
+
+
 def start(sid: str) -> dict | None:
     """Start an OBS recording for this session.
 
@@ -528,7 +606,7 @@ def start(sid: str) -> dict | None:
     Returns:
         A handle to pass to stop(), or None if video is unavailable.
     """
-    client = _client()
+    client = _client() or _client_after_setup()
     if client is None:
         return None
     try:
@@ -540,6 +618,16 @@ def start(sid: str) -> dict | None:
     except Exception as exc:
         print(f"  !! OBS did not answer ({exc}) - no video this session.")
         return None
+    # OBS may not be the OBS rig_setup saw when the rig started (installed since, another
+    # scene on screen, Desktop Audio unmuted): put the scene and the audio right first.
+    prepared = prepare(client)
+    if not prepared["scene_was_ready"] and not prepared["error"] and SELF_SETUP:
+        print(f"  obs: the '{SCENE}' scene was not in use - set up now")
+    if prepared["error"]:
+        print(f"  !! obs: {prepared['error']}")
+    elif not SELF_SETUP and not prepared["scene_was_ready"]:
+        print(f"  !! obs: the scene on screen has no '{SOURCE}'; whatever it shows and plays is "
+              "recorded (PLAYSMART_OBS_SETUP=0)")
     # The screen may not be the one rig_setup saw when the rig started: fit OBS to it now,
     # while nothing is recording.
     fitted = fit(client)
@@ -563,7 +651,7 @@ def start(sid: str) -> dict | None:
         print(f"  !! the game renders at {source[0]}x{source[1]} on a {fitted['screen_px'][0]}x"
               f"{fitted['screen_px'][1]} screen - recorded, and scaled to fill the video")
     return {"client": client, "t0_unix_ms": t0, "requested_at_ms": _now_ms(),
-            "fit": fitted, "source_px": source}
+            "fit": fitted, "source_px": source, "prepared": prepared}
 
 
 def stop(sid: str, handle: dict | None) -> Path | None:
@@ -603,6 +691,12 @@ def stop(sid: str, handle: dict | None) -> Path | None:
     }
     if fitted.get("error"):
         geometry["fit_error"] = fitted["error"]
+    # Was the recording made from the PlaySmart scene? False here with nothing in
+    # "changes" means a scene made by hand was recorded as it was: its sound may hold
+    # everything the PC played.
+    prepared = handle.get("prepared") or {}
+    scene = {"ready_at_start": prepared.get("scene_was_ready"), "self_setup": SELF_SETUP,
+             "changes": prepared.get("changes", []), "error": prepared.get("error")}
     try:
         response = client.stop_record()
         source = Path(getattr(response, "output_path", "") or "")
@@ -635,6 +729,7 @@ def stop(sid: str, handle: dict | None) -> Path | None:
         "t0_unix_ms": handle.get("t0_unix_ms"),
         **stats,
         **geometry,
+        "scene": scene,
         "note": ("t0_unix_ms is the wall-clock time of the first frame. A frame at "
                  "T seconds into the file is at t0_unix_ms + T*1000. Convert that to "
                  "game time through the gamestate stream, which carries both clocks. "
